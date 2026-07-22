@@ -1,0 +1,81 @@
+// config_test.go contains unit tests for the Config struct and its validation.
+package fluxgo
+
+import (
+	"testing"
+	"time"
+)
+
+func TestDefaultConfigIsValid(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("DefaultConfig() produced an invalid config: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidAlpha(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Alpha = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for Alpha = 0, got nil")
+	}
+
+	cfg.Alpha = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for Alpha = 1.5, got nil")
+	}
+}
+
+func TestValidateRejectsInvalidWeights(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.W1 = 0.5
+	cfg.W2 = 0.4 // sum = 0.9, bukan 1.0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for W1+W2 != 1.0, got nil")
+	}
+}
+
+func TestValidateRejectsInvalidThetaRange(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ThetaMin = 0.9
+	cfg.ThetaMax = 0.1 // min > max
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for ThetaMin > ThetaMax, got nil")
+	}
+}
+
+func TestValidateRejectsInvalidPercentileTarget(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PercentileTarget = 50
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for PercentileTarget = 50, got nil")
+	}
+}
+
+func TestValidateRejectsZeroWindowSize(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WindowSize = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for WindowSize = 0, got nil")
+	}
+}
+
+func TestValidateRejectsZeroDurations(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for WarmupDuration = 0, got nil")
+	}
+
+	cfg = DefaultConfig()
+	cfg.RecoveryTimeout = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for RecoveryTimeout = 0, got nil")
+	}
+
+	cfg = DefaultConfig()
+	cfg.MinDwellTime = -1 * time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative MinDwellTime, got nil")
+	}
+}
