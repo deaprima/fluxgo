@@ -1,0 +1,14 @@
+docs/
+.agents/
+
+*.exe
+*.out
+/fluxgo
+
+*.coverprofile
+coverage.out
+
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
