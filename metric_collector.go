@@ -55,6 +55,11 @@ func (m *MetricCollector) TotalRequests() int64 {
 	return atomic.LoadInt64(&m.totalRequests)
 }
 
+// TotalFailures returns the total number of failed requests recorded since the last reset.
+func (m *MetricCollector) TotalFailures() int64 {
+    return atomic.LoadInt64(&m.totalFailures)
+}
+
 // Reset clears all counters and resets both signal engines to their initial state.
 func (m *MetricCollector) Reset() {
 	atomic.StoreInt64(&m.totalRequests, 0)
