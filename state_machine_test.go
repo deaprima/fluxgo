@@ -160,3 +160,19 @@ func TestStateMachine_ConcurrentAccess_RaceDetector(t *testing.T) {
     }
     wg.Wait()
 }
+
+func TestStateMachine_OnHalfOpenSuccess_NoopWhenNotHalfOpen(t *testing.T) {
+    sm := NewStateMachine(DefaultConfig())
+    sm.OnHalfOpenSuccess() 
+    if sm.State() != StateClosed {
+        t.Errorf("State() = %v, want Closed (no-op)", sm.State())
+    }
+}
+
+func TestStateMachine_OnHalfOpenFailure_NoopWhenNotHalfOpen(t *testing.T) {
+    sm := NewStateMachine(DefaultConfig())
+    sm.OnHalfOpenFailure() 
+    if sm.State() != StateClosed {
+        t.Errorf("State() = %v, want Closed (no-op)", sm.State())
+    }
+}

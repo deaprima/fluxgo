@@ -95,10 +95,9 @@ func TestCircuitBreaker_OnStateChange_Callback(t *testing.T) {
 func TestCircuitBreaker_WarmupPreventsAdaptiveDecision(t *testing.T) {
     cfg := DefaultConfig()
     cfg.WarmupDuration = 30 * time.Second
-    cfg.ThetaBase = 0.1 // sangat rendah: tanpa warmup, pasti trip
+    cfg.ThetaBase = 0.1
     cb := NewCircuitBreaker(Settings{Name: "warmup-test", Config: cfg})
 
-    // harusnya tidak trip selama warmup meski failure rate tinggi
     for i := 0; i < 20; i++ {
         cb.Execute(func() (interface{}, error) { return nil, errDownstream })
     }
@@ -124,4 +123,49 @@ func TestCircuitBreaker_ConcurrentExecute_RaceDetector(t *testing.T) {
         }(i)
     }
     wg.Wait()
+}
+
+func TestCircuitBreaker_HalfOpenProbe_Success_TransitionsToClosed(t *testing.T) {
+    s := defaultSettings()
+    s.Config.ThetaBase = 0.5
+    s.Config.RecoveryTimeout = time.Millisecond // timeout singkat
+    cb := NewCircuitBreaker(s)
+
+    for i := 0; i < 10; i++ {
+        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+    }
+    if cb.State() != StateOpen {
+        t.Fatal("expected Open state")
+    }
+
+    time.Sleep(5 * time.Millisecond) // tunggu recovery timeout
+
+    _, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
+    if err != nil {
+        t.Errorf("Execute() = %v, want nil on HalfOpen probe", err)
+    }
+    if cb.State() != StateClosed {
+        t.Errorf("State() = %v, want Closed after successful probe", cb.State())
+    }
+}
+
+func TestCircuitBreaker_HalfOpenProbe_Failure_TransitionsToOpen(t *testing.T) {
+    s := defaultSettings()
+    s.Config.ThetaBase = 0.5
+    s.Config.RecoveryTimeout = time.Millisecond
+    cb := NewCircuitBreaker(s)
+
+    for i := 0; i < 10; i++ {
+        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+    }
+    if cb.State() != StateOpen {
+        t.Fatal("expected Open state")
+    }
+
+    time.Sleep(5 * time.Millisecond)
+
+    cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+    if cb.State() != StateOpen {
+        t.Errorf("State() = %v, want Open after failed probe", cb.State())
+    }
 }
