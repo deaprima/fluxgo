@@ -12,3 +12,8 @@ coverage.out
 .idea/
 Thumbs.db
 .DS_Store
+
+coverage.out
+coverage.html
+bench_result.txt
+*.out
