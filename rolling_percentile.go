@@ -62,6 +62,14 @@ func (r *RollingPercentile) Percentiles() (p95, p99 float64) {
 	sort.Float64s(sorted)
 	return percentile(sorted, 95), percentile(sorted, 99)
 }
+
+// Current returns the current P95 and P99 without recording a new observation
+// It is equivalent to percentiles and is provided as a convenience alias used by
+// the slow-request classifier and observability accessors
+func (r *RollingPercentile) Current() (p95, p99 float64){
+	return r.Percentiles()
+}
+
 // Reset clears all observations from the sliding window.
 func (r *RollingPercentile) Reset() {
 	r.mu.Lock()

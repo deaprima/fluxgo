@@ -91,3 +91,23 @@ func TestRollingPercentileConcurrentUpdate(t *testing.T) {
 	// no panic or deadlock — race detector will catch mutex violations
 	rp.Percentiles()
 }
+
+func TestRollingPercentileCurrent_EqualsPercentiles(t *testing.T) {
+	rp := NewRollingPercentile(10)
+	for i := 1; i <= 10; i++ {
+		rp.Update(float64(i))
+	}
+	p95a, p99a := rp.Percentiles()
+	p95b, p99b := rp.Current()
+	if p95a != p95b || p99a != p99b {
+		t.Errorf("Current() != Percentiles(): got (%v,%v) vs (%v,%v)", p95b, p99b, p95a, p99a)
+	}
+}
+
+func TestRollingPercentileCurrent_EmptyReturnsZero(t *testing.T) {
+	rp := NewRollingPercentile(10)
+	p95, p99 := rp.Current()
+	if p95 != 0 || p99 != 0 {
+		t.Errorf("expected (0, 0) for empty window, got (%v, %v)", p95, p99)
+	}
+}
