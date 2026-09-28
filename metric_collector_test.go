@@ -65,3 +65,29 @@ func TestMetricCollector_ConcurrentRecord_RaceDetector(t *testing.T) {
         t.Errorf("TotalRequests() = %d, want %d after concurrent access", got, want)
     }
 }
+
+func TestMetricCollector_RecordDegraded_Counter(t *testing.T) {
+	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10))
+
+	mc.Record(10*time.Millisecond, false) // explicit failure
+	mc.RecordDegraded()                   // slow request (also counted as failure by caller)
+
+	if got := mc.DegradedRequests(); got != 1 {
+		t.Errorf("DegradedRequests() = %d, want 1", got)
+	}
+	// TotalFailures should reflect the explicit failure via Record, not RecordDegraded
+	if got := mc.TotalFailures(); got != 1 {
+		t.Errorf("TotalFailures() = %d, want 1", got)
+	}
+}
+
+func TestMetricCollector_Reset_ClearsDegradedCounter(t *testing.T) {
+	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10))
+	mc.RecordDegraded()
+	mc.RecordDegraded()
+	mc.Reset()
+
+	if got := mc.DegradedRequests(); got != 0 {
+		t.Errorf("DegradedRequests() after Reset = %d, want 0", got)
+	}
+}

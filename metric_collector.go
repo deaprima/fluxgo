@@ -14,6 +14,7 @@ import (
 type MetricCollector struct {
 	totalRequests int64
 	totalFailures int64
+	degradedRequests int64
 
 	ewma    *EWMA
 	rolling *RollingPercentile
@@ -60,10 +61,21 @@ func (m *MetricCollector) TotalFailures() int64 {
     return atomic.LoadInt64(&m.totalFailures)
 }
 
+// RecordDegraded increments the degraded-request counter.
+func (m *MetricCollector) RecordDegraded() {
+	atomic.AddInt64(&m.degradedRequests, 1)
+}
+
+// DegradedRequest returns the total number of request classified as degraded
+func (m *MetricCollector) DegradedRequests() int64 {
+	return atomic.LoadInt64(&m.degradedRequests)
+}
+
 // Reset clears all counters and resets both signal engines to their initial state.
 func (m *MetricCollector) Reset() {
 	atomic.StoreInt64(&m.totalRequests, 0)
 	atomic.StoreInt64(&m.totalFailures, 0)
+	atomic.StoreInt64(&m.degradedRequests, 0)
 	m.ewma.Reset()
 	m.rolling.Reset()
 }
