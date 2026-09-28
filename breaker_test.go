@@ -169,3 +169,79 @@ func TestCircuitBreaker_HalfOpenProbe_Failure_TransitionsToOpen(t *testing.T) {
         t.Errorf("State() = %v, want Open after failed probe", cb.State())
     }
 }
+
+func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 50 * time.Millisecond
+	cfg.SlowRequestMargin = 2.0
+	cb := NewCircuitBreaker(Settings{Name: "test-slow", Config: cfg})
+
+	// Fill rolling window with 10ms baseline requests to establish Pt.
+	for i := 0; i < 110; i++ {
+		cb.Execute(func() (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return nil, nil
+		})
+	}
+
+	// Wait for warm-up to finish.
+	time.Sleep(60 * time.Millisecond)
+
+	degradedBefore := cb.collector.DegradedRequests()
+
+	// Send a slow request: 10ms * 2.0 margin = 20ms threshold; 30ms > 20ms → degraded.
+	cb.Execute(func() (interface{}, error) {
+		time.Sleep(30 * time.Millisecond)
+		return nil, nil
+	})
+
+	degradedAfter := cb.collector.DegradedRequests()
+	if degradedAfter <= degradedBefore {
+		t.Errorf("expected DegradedRequests to increase, before=%d after=%d",
+			degradedBefore, degradedAfter)
+	}
+}
+
+func TestCircuitBreaker_SlowRequest_InactiveDuringWarmup(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 10 * time.Second 
+	cfg.SlowRequestMargin = 2.0
+	cb := NewCircuitBreaker(Settings{Name: "test-warmup", Config: cfg})
+
+	cb.Execute(func() (interface{}, error) {
+		time.Sleep(500 * time.Millisecond)
+		return nil, nil
+	})
+
+	if got := cb.collector.DegradedRequests(); got != 0 {
+		t.Errorf("expected DegradedRequests = 0 during warmup, got %d", got)
+	}
+}
+
+func TestCircuitBreaker_NormalRequest_NotClassifiedAsDegraded(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 50 * time.Millisecond
+	cfg.SlowRequestMargin = 2.0
+	cb := NewCircuitBreaker(Settings{Name: "test-normal", Config: cfg})
+
+	// Establish baseline.
+	for i := 0; i < 110; i++ {
+		cb.Execute(func() (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return nil, nil
+		})
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	degradedBefore := cb.collector.DegradedRequests()
+
+	// Request within 2x margin (10ms baseline, 15ms < 20ms threshold → normal).
+	cb.Execute(func() (interface{}, error) {
+		time.Sleep(15 * time.Millisecond)
+		return nil, nil
+	})
+
+	if got := cb.collector.DegradedRequests(); got != degradedBefore {
+		t.Errorf("expected DegradedRequests unchanged for normal request, got %d", got)
+	}
+}

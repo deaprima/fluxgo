@@ -120,6 +120,21 @@ func (cb *CircuitBreaker) Counts() Counts {
 // record metrics, attempt baseline capture if warming up, or evaluate
 // the adaptive threshold and notify the state machine
 func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool) {
+	if !cb.estimator.IsWarmingUp() {
+		ptPrev95, ptPrev99 := cb.rolling.Current()
+		var ptPrev float64
+		if cb.cfg.PercentileTarget == 99 {
+			ptPrev = ptPrev99
+		} else {
+			ptPrev = ptPrev95
+		}
+		if ptPrev > 0 && float64(latency.Milliseconds()) > ptPrev*cb.cfg.SlowRequestMargin {
+			success = false
+			cb.collector.RecordDegraded()
+		}
+	}
+
+	// Record AFTER classification so rolling window gets updated after snapshot.
 	cb.collector.Record(latency, success)
 
 	if success {
@@ -141,21 +156,22 @@ func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool)
 	fr := cb.collector.FailureRate()
 
 	if cb.estimator.IsWarmingUp() {
-        cb.estimator.TryCapture(St, Pt, fr)
-        return
-    }
-    Sbase, Pbase := cb.estimator.Baseline()
-    thetaT := cb.calculator.Calculate(St, Pt, Sbase, Pbase)
-    state := cb.machine.State()
-    switch {
-    case state == StateHalfOpen && success:
-        cb.machine.OnHalfOpenSuccess()
-    case state == StateHalfOpen && !success:
-        cb.machine.OnHalfOpenFailure()
-    case state == StateClosed:
-        cb.machine.EvaluateClosed(fr, thetaT)
-    }
+		cb.estimator.TryCapture(St, Pt, fr)
+		return
+	}
+	Sbase, Pbase := cb.estimator.Baseline()
+	thetaT := cb.calculator.Calculate(St, Pt, Sbase, Pbase)
+	state := cb.machine.State()
+	switch {
+	case state == StateHalfOpen && success:
+		cb.machine.OnHalfOpenSuccess()
+	case state == StateHalfOpen && !success:
+		cb.machine.OnHalfOpenFailure()
+	case state == StateClosed:
+		cb.machine.EvaluateClosed(fr, thetaT)
+	}
 }
+
 
 // notifyIfChanged fires the OnStateChange callback if the state changed.
 func (cb *CircuitBreaker) notifyIfChanged(from, to State) {
