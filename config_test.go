@@ -79,3 +79,26 @@ func TestValidateRejectsZeroDurations(t *testing.T) {
 		t.Error("expected error for negative MinDwellTime, got nil")
 	}
 }
+
+func TestDefaultConfig_SlowRequestMargin(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.SlowRequestMargin <= 0 {
+		t.Errorf("expected SlowRequestMargin > 0, got %v", cfg.SlowRequestMargin)
+	}
+}
+
+func TestValidate_SlowRequestMargin_Zero(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SlowRequestMargin = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for SlowRequestMargin = 0, got nil")
+	}
+}
+
+func TestValidate_SlowRequestMargin_Negative(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SlowRequestMargin = -1.0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for SlowRequestMargin = -1.0, got nil")
+	}
+}

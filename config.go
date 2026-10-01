@@ -49,6 +49,11 @@ type Config struct {
 	// used to prevent rapid oscillation (anti-flapping).
 	MinDwellTime time.Duration
 
+	// SlowRequestMargin is the multiplier applied to the current rolling percentile
+	// to classify a request as degraded.
+	// Must be greater than zero. Default: 2.0.
+	SlowRequestMargin float64
+
 	// RandomSeed is an optional seed for reproducible testbed runs.
 	// It is not used by the core library.
 	RandomSeed int64
@@ -70,6 +75,7 @@ func DefaultConfig() Config {
 		WarmupMaxFailRate: 0.05,
 		RecoveryTimeout:   60 * time.Second,
 		MinDwellTime:      5 * time.Second,
+		SlowRequestMargin: 2.0,
 		RandomSeed:        0,
 	}
 }
@@ -105,6 +111,9 @@ func (c Config) Validate() error {
 	}
 	if c.MinDwellTime < 0 {
 		return errors.New("min dwell time must be non-negative")
+	}
+	if c.SlowRequestMargin <= 0 {
+		return errors.New("slow request margin must be greater than zero")
 	}
 	return nil
 }
