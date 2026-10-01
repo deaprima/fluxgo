@@ -39,18 +39,19 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 
 | Parameter | Default | Description |
 |---|---|---|
-| `Alpha` | `0.3` | EWMA smoothing factor (0 < α ≤ 1) |
-| `WindowSize` | `100` | Rolling percentile window size |
-| `PercentileTarget` | `95` | Latency percentile to track: 95 or 99 |
+| `Alpha` | `0.3` | EWMA smoothing factor (0 < α ≤ 1). Locked in range 0.1–0.3. |
+| `WindowSize` | `100` | Rolling percentile window size. Locked; not a tuning parameter. |
+| `PercentileTarget` | `95` | Latency percentile to track: 95 or 99. Locked at 95. |
 | `W1` | `0.4` | Weight of EWMA signal in degradation ratio |
 | `W2` | `0.6` | Weight of P95/P99 signal (W1 + W2 = 1) |
 | `ThetaBase` | `0.6` | Baseline failure-rate threshold |
 | `ThetaMin` | `0.05` | Minimum adaptive threshold (clamp floor) |
 | `ThetaMax` | `0.9` | Maximum adaptive threshold (clamp ceiling) |
-| `WarmupDuration` | `30s` | Observation period before adaptive threshold activates |
+| `WarmupDuration` | `30s` | Observation period before adaptive threshold activates. 0 = no warmup. |
 | `WarmupMaxFailRate` | `0.05` | Max failure rate for a valid warmup capture |
 | `RecoveryTimeout` | `60s` | Time Open before transitioning to Half-Open |
 | `MinDwellTime` | `5s` | Minimum time between state transitions (anti-flapping) |
+| `SlowRequestMargin` | `2.0` | Multiplier on Pt; requests with latency > Pt × margin are classified as degraded. Locked at 2.0. |
 | `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
 
 ## Adaptive Threshold Formula
@@ -80,6 +81,45 @@ state transitions. After any transition, the circuit cannot trip to Open again
 until `MinDwellTime` has elapsed. This prevents rapid oscillation when the
 failure rate hovers near the adaptive threshold.
 
+> **Note:** `MinDwellTime` is an implementation safeguard not described in the
+> original circuit breaker design. It is documented as a justified deviation
+> because it prevents instability at the cost of slightly delaying re-trip.
+
+## Slow Request Classification
+
+Beyond explicit errors, fluxgo classifies a request as **degraded** if its
+latency exceeds `Pt × SlowRequestMargin` (default: P95 × 2.0). A degraded
+request is counted as a failure in the internal failure rate.
+
+```
+latency > P95 × 2.0  →  treated as failure internally
+                          result/error returned to caller is unchanged
+```
+
+**Rules:**
+- Classification is inactive during warmup or when the rolling window is not yet populated
+- The percentile snapshot is taken **before** the current latency enters the window (no self-comparison)
+- The result and error values returned by `Execute()` to the caller are **not affected** — gobreaker API compatibility is preserved
+- Degraded requests are observable via `Snapshot().DegradedRequests`
+
+## Observability
+
+`Snapshot()` returns a point-in-time read-only view of all internal signals:
+
+```go
+snap := cb.Snapshot()
+fmt.Println(snap.State)            // Closed / Open / HalfOpen
+fmt.Println(snap.St)               // current EWMA latency (ms)
+fmt.Println(snap.Pt)               // current P95/P99 (ms)
+fmt.Println(snap.ThetaT)           // current adaptive threshold
+fmt.Println(snap.FailureRate)      // current failure rate
+fmt.Println(snap.DegradedRequests) // slow requests classified as degraded
+fmt.Println(snap.IsWarmingUp)      // warmup still active?
+```
+
+This is intended for the testbed's `GET /debug/cb` endpoint and external
+dashboard tooling. All fields are read under their respective component locks.
+
 ## Algorithm Complexity
 
 | Component | Time | Space |
@@ -95,18 +135,19 @@ Benchmark on Intel Core i5-11300H @ 3.10GHz:
 
 | State | Latency/call | Allocations |
 |---|---|---|
-| Closed (full pipeline) | 1,294 ns | 2 allocs / 1,791 B |
-| Open (fast reject) | 99 ns | 0 allocs |
+| Closed (full pipeline) | ~1,558 ns | 2 allocs / 1,791 B |
+| Open (fast reject) | ~114 ns | 0 allocs |
 
 ## API Compatibility with gobreaker
 
 | gobreaker | fluxgo | Note |
 |---|---|---|
-| `NewCircuitBreaker(Settings)` | `NewCircuitBreaker(Settings)` | Same signature |
+| `NewCircuitBreaker(Settings)` | `NewCircuitBreaker(Settings)` | Same signature; panics on invalid Config |
 | `cb.Execute(req)` | `cb.Execute(req)` | Identical |
 | `cb.State()` | `cb.State()` | Identical |
 | `cb.Counts()` | `cb.Counts()` | Compatible fields |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |
+| — | `cb.Snapshot()` | fluxgo-only: observability accessor |
 
 ## Mode Switching for Testbed (CB_MODE)
 
