@@ -36,6 +36,20 @@ type Counts struct {
 	ConsecutiveFailures	 uint32
 }
 
+// Snapshot is a point-in-time read-only view of the circuit breaker's internal signal
+type Snapshot struct {
+	State	State
+	St		float64 // current ewma latency
+	Pt		float64 // current rolling percentile 
+	Dt 		float64 // degradation ratio
+	ThetaT	float64 // current adaptive threshold
+	Sbase	float64 // healthy state ewma baseline
+	Pbase 	float64 // healthy state percentile baseline
+	FailureRate float64 // current failure rate in observation window
+	DegradedRequests int64 // request classified as slow 
+	IsWarmingUp	bool // true if baseline has not yet been capture
+}
+
 // CircuitBreaker is the main entry point of fluxgo. It orchestrates all
 // internal components (EWMA, RollingPercentile, MetricCollector,
 // BaselineEstimator, AdaptiveThresholdCalculator, StateMachine) behind
@@ -113,6 +127,38 @@ func (cb *CircuitBreaker) Counts() Counts {
 		TotalFailures: 		uint32(failures),
 		ConsecutiveSuccesses: 	uint32(atomic.LoadInt64(&cb.consecutiveSuccesses)),
 		ConsecutiveFailures: 	uint32(atomic.LoadInt64(&cb.consecutiveFailures)),
+	}
+}
+
+// Snapshot returns a point-in-time view of the circuit breaker's internal
+// signals for observability purposes (NF4). It is safe to call concurrently.
+func (cb *CircuitBreaker) Snapshot() Snapshot {
+	St := cb.ewma.Value()
+	p95, p99 := cb.rolling.Current()
+	var Pt float64
+	if cb.cfg.PercentileTarget == 99 {
+		Pt = p99
+	} else {
+		Pt = p95
+	}
+	Sbase, Pbase := cb.estimator.Baseline()
+
+	var Dt float64
+	if Sbase > 0 && Pbase > 0 {
+		Dt = cb.cfg.W1*(St/Sbase) + cb.cfg.W2*(Pt/Pbase)
+	}
+
+	return Snapshot{
+		State:            cb.machine.State(),
+		St:               St,
+		Pt:               Pt,
+		Dt:               Dt,
+		ThetaT:           cb.calculator.Calculate(St, Pt, Sbase, Pbase),
+		Sbase:            Sbase,
+		Pbase:            Pbase,
+		FailureRate:      cb.collector.FailureRate(),
+		DegradedRequests: cb.collector.DegradedRequests(),
+		IsWarmingUp:      cb.estimator.IsWarmingUp(),	
 	}
 }
 

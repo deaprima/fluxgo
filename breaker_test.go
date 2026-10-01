@@ -245,3 +245,59 @@ func TestCircuitBreaker_NormalRequest_NotClassifiedAsDegraded(t *testing.T) {
 		t.Errorf("expected DegradedRequests unchanged for normal request, got %d", got)
 	}
 }
+
+func TestCircuitBreaker_Snapshot_FieldsConsistent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 50 * time.Millisecond
+	cb := NewCircuitBreaker(Settings{Name: "snap-test", Config: cfg})
+
+	// Populate some data.
+	for i := 0; i < 20; i++ {
+		cb.Execute(func() (interface{}, error) {
+			time.Sleep(5 * time.Millisecond)
+			return nil, nil
+		})
+	}
+
+	snap := cb.Snapshot()
+
+	if snap.State != StateClosed {
+		t.Errorf("expected State = Closed, got %v", snap.State)
+	}
+	if snap.St < 0 {
+		t.Errorf("expected St >= 0, got %v", snap.St)
+	}
+	if snap.FailureRate < 0 || snap.FailureRate > 1 {
+		t.Errorf("expected FailureRate in [0,1], got %v", snap.FailureRate)
+	}
+	if snap.ThetaT < cfg.ThetaMin || snap.ThetaT > cfg.ThetaMax {
+		t.Errorf("expected ThetaT in [%v,%v], got %v", cfg.ThetaMin, cfg.ThetaMax, snap.ThetaT)
+	}
+}
+
+func TestCircuitBreaker_Snapshot_WarmingUpFlag(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 10 * time.Second
+	cb := NewCircuitBreaker(Settings{Name: "snap-warmup", Config: cfg})
+
+	if snap := cb.Snapshot(); !snap.IsWarmingUp {
+		t.Error("expected IsWarmingUp = true immediately after creation")
+	}
+}
+
+func TestCircuitBreaker_Snapshot_ThreadSafe(t *testing.T) {
+	cb := NewCircuitBreaker(Settings{Name: "snap-race", Config: DefaultConfig()})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			cb.Execute(func() (interface{}, error) { return nil, nil })
+		}()
+		go func() {
+			defer wg.Done()
+			_ = cb.Snapshot()
+		}()
+	}
+	wg.Wait()
+}
