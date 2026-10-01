@@ -103,8 +103,8 @@ func (c Config) Validate() error {
 	if c.ThetaBase <= 0 || c.ThetaBase > 1 {
 		return errors.New("theta base must be in the range (0, 1]")
 	}
-	if c.WarmupDuration <= 0 {
-		return errors.New("warmup duration must be greater than zero")
+	if c.WarmupDuration < 0 {
+   		return errors.New("warmup duration must be non-negative")
 	}
 	if c.RecoveryTimeout <= 0 {
 		return errors.New("recovery timeout must be greater than zero")

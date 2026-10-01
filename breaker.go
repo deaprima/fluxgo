@@ -72,6 +72,10 @@ type CircuitBreaker struct {
 
 // NewCircuitBreaker returns a CircuitBreaker wired and ready to use.
 func NewCircuitBreaker(s Settings) *CircuitBreaker {
+    if err := s.Config.Validate(); err != nil {
+        panic("fluxgo: invalid config: " + err.Error())
+    }
+	
     cfg := s.Config
     ewma    := NewEWMA(cfg.Alpha)
     rolling := NewRollingPercentile(cfg.WindowSize)
@@ -181,8 +185,7 @@ func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool)
 	}
 
 	// Record AFTER classification so rolling window gets updated after snapshot.
-	cb.collector.Record(latency, success)
-
+	p95, p99 := cb.collector.Record(latency, success)
 	if success {
 		atomic.StoreInt64(&cb.consecutiveFailures, 0)
 		atomic.AddInt64(&cb.consecutiveSuccesses, 1)
@@ -192,7 +195,6 @@ func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool)
 	}
 
 	St := cb.ewma.Value()
-	p95, p99 := cb.rolling.Percentiles()
 	var Pt float64
 	if cb.cfg.PercentileTarget == 99 {
 		Pt = p99
