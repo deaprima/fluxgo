@@ -30,14 +30,15 @@ func NewMetricCollector(ewma *EWMA, rolling *RollingPercentile) *MetricCollector
 
 // Record incorporates a single request observation. latency is forwarded to
 // both signal engines; success=false increments the failure counter.
-func (m *MetricCollector) Record(latency time.Duration, success bool) {
-	ms := latency.Seconds() * 1000 // convert to milliseconds for signal engines
+func (m *MetricCollector) Record(latency time.Duration, success bool) (p95, p99 float64) {
+	ms := latency.Seconds() * 1000
 	m.ewma.Update(ms)
-	m.rolling.Update(ms)
+	p95, p99 = m.rolling.Update(ms)
 	atomic.AddInt64(&m.totalRequests, 1)
 	if !success {
 		atomic.AddInt64(&m.totalFailures, 1)
 	}
+	return
 }
 
 // FailureRate returns the ratio of failed requests to total requests observed

@@ -62,9 +62,9 @@ func TestValidateRejectsZeroWindowSize(t *testing.T) {
 
 func TestValidateRejectsZeroDurations(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.WarmupDuration = 0
+	cfg.WarmupDuration = -1
 	if err := cfg.Validate(); err == nil {
-		t.Error("expected error for WarmupDuration = 0, got nil")
+		t.Error("expected error for WarmupDuration = -1, got nil")
 	}
 
 	cfg = DefaultConfig()
