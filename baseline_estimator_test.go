@@ -1,87 +1,73 @@
-// baseline_estimator_test.go tests BaselineEstimator for correct capture
-// behavior, safeguards, fallback, and re-capture after warmup expiry.
 package fluxgo
 
 import (
-    "testing"
-    "time"
+	"testing"
+	"time"
 )
 
-// testClock returns a controllable clock. Calling advance(d) moves time forward.
-func testClock(initial time.Time) (now func() time.Time, advance func(time.Duration)) {
-    current := initial
-    return func() time.Time { return current },
-        func(d time.Duration) { current = current.Add(d) }
+func TestBaselineEstimator_IdleBeforeFirstObservation(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
+
+	clock.Advance(10 * time.Minute)
+	if !b.IsWarmingUp() {
+		t.Fatal("expected warm-up to remain active before the first observation")
+	}
+
+	b.Observe(20, 40, 0, true)
+	clock.Advance(cfg.WarmupDuration)
+	b.Observe(20, 40, 0, true)
+
+	if sbase, pbase := b.Baseline(); sbase != 20 || pbase != 40 {
+		t.Fatalf("expected baseline (20, 40), got (%v, %v)", sbase, pbase)
+	}
 }
 
-func TestBaselineEstimator_CaptureSucceedsWhenConditionsGood(t *testing.T) {
-    cfg := DefaultConfig()
-    now, _ := testClock(time.Now())
-    b := newBaselineEstimatorWithClock(cfg, now)
+func TestBaselineEstimator_NoCaptureBeforeWarmupEnds(t *testing.T) {
+	clock := newFakeClock()
+	b := newBaselineEstimatorWithClock(DefaultConfig(), clock.Now)
 
-    if !b.IsWarmingUp() {
-        t.Fatal("expected IsWarmingUp() = true before any capture")
-    }
+	b.Observe(20, 40, 0, true)
 
-    b.TryCapture(100.0, 120.0, 0.02) // failure rate 2% < 5% threshold
-
-    if b.IsWarmingUp() {
-        t.Error("expected IsWarmingUp() = false after valid capture")
-    }
-    sbase, pbase := b.Baseline()
-    if sbase != 100.0 || pbase != 120.0 {
-        t.Errorf("Baseline() = (%f, %f), want (100.0, 120.0)", sbase, pbase)
-    }
+	if sbase, pbase := b.Baseline(); sbase != 0 || pbase != 0 {
+		t.Fatalf("expected no capture on the first observation, got (%v, %v)", sbase, pbase)
+	}
+	if !b.IsWarmingUp() {
+		t.Fatal("expected warm-up to be active")
+	}
 }
 
-func TestBaselineEstimator_CaptureRejectedWhenFailureRateHigh(t *testing.T) {
-    cfg := DefaultConfig()
-    now, _ := testClock(time.Now())
-    b := newBaselineEstimatorWithClock(cfg, now)
+func TestBaselineEstimator_FallbackThenRecapture(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
 
-    b.TryCapture(100.0, 120.0, 0.30) // failure rate 30% > 5% threshold
+	b.Observe(100, 300, 0.5, true)
+	clock.Advance(cfg.WarmupDuration)
+	b.Observe(100, 300, 0.5, true)
+	if b.IsWarmingUp() || !b.NeedsCapture() {
+		t.Fatal("expected fallback baseline with capture still pending")
+	}
 
-    if !b.IsWarmingUp() {
-        t.Error("expected IsWarmingUp() = true when capture was rejected")
-    }
-    sbase, pbase := b.Baseline()
-    if sbase != 0 || pbase != 0 {
-        t.Errorf("Baseline() = (%f, %f), want (0, 0) after rejected capture", sbase, pbase)
-    }
+	b.Observe(20, 40, 0, true)
+	if sbase, pbase := b.Baseline(); sbase != 20 || pbase != 40 {
+		t.Fatalf("expected re-captured baseline (20, 40), got (%v, %v)", sbase, pbase)
+	}
+	if b.NeedsCapture() {
+		t.Fatal("expected capture to be complete")
+	}
 }
 
-func TestBaselineEstimator_FallbackAfterWarmupExpires(t *testing.T) {
-    cfg := DefaultConfig() // WarmupDuration = 30s
-    now, advance := testClock(time.Now())
-    b := newBaselineEstimatorWithClock(cfg, now)
+func TestBaselineEstimator_NoValidCaptureWhenNotClosed(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
 
-    advance(31 * time.Second) // past warmup duration
+	b.Observe(20, 40, 0, false)
 
-    b.TryCapture(80.0, 90.0, 0.40) // bad conditions, but warmup expired
-
-    if b.IsWarmingUp() {
-        t.Error("expected IsWarmingUp() = false after warmup expired (fallback)")
-    }
-    sbase, pbase := b.Baseline()
-    if sbase != 80.0 || pbase != 90.0 {
-        t.Errorf("Baseline() = (%f, %f), want fallback (80.0, 90.0)", sbase, pbase)
-    }
-}
-
-func TestBaselineEstimator_RecaptureUpgradesFallback(t *testing.T) {
-    cfg := DefaultConfig()
-    now, advance := testClock(time.Now())
-    b := newBaselineEstimatorWithClock(cfg, now)
-
-    // trigger fallback
-    advance(31 * time.Second)
-    b.TryCapture(80.0, 90.0, 0.40)
-
-    // conditions improve → should upgrade to valid capture
-    b.TryCapture(100.0, 120.0, 0.02)
-
-    sbase, pbase := b.Baseline()
-    if sbase != 100.0 || pbase != 120.0 {
-        t.Errorf("Baseline() = (%f, %f), want upgraded capture (100.0, 120.0)", sbase, pbase)
-    }
+	if !b.NeedsCapture() {
+		t.Fatal("expected no valid capture while the circuit is not closed")
+	}
 }

@@ -68,66 +68,69 @@ func (sm *StateMachine) State() State {
 	return sm.state
 }
 
-// AllowRequest reports whether the circuit breaker should allow the next request to processed.
-// If the circuit is Open and RecoveryTimeout has elapsed, it transitions to HalfOpen and returns
-// true to allow one probe request.
-func (sm *StateMachine) AllowRequest() bool {
+// AllowRequest reports whether the next request may proceed. If the circuit
+// is Open and RecoveryTimeout has elapsed, it transitions to HalfOpen and
+// reports transitioned as true.
+func (sm *StateMachine) AllowRequest() (allowed bool, transitioned bool){
 	sm.mu.Lock()
     defer sm.mu.Unlock()
     switch sm.state {
-    case StateClosed: return true
-    case StateHalfOpen: return true
+    case StateClosed, StateHalfOpen: 
+        return true, false
     case StateOpen:
         if sm.now().Sub(sm.openedAt) >= sm.cfg.RecoveryTimeout {
             sm.setState(StateHalfOpen)
-            return true
+            return true, true
         }
-        return false
     }
-    return false
+    return false, false
 }
 
 // EvaluateClosed checks whether the circuit should transition from Closed to
 // Open. It is a no-op if the current state is not Closed. Anti-flapping is
 // enforced: the transition is suppressed if less than MinDwellTime has elapsed
 // since the last state transition.
-func (sm *StateMachine) EvaluateClosed(failureRate, thetaT float64) {
+func (sm *StateMachine) EvaluateClosed(failureRate, thetaT float64) bool {
     sm.mu.Lock()
     defer sm.mu.Unlock()
-    if sm.state != StateClosed {
-        return
+    if sm.state != StateClosed || failureRate < thetaT {
+        return false
     }
-    if failureRate < thetaT {
-        return
-    }
+
     // anti-flapping: enforce minimum dwell time before tripping to Open
     if sm.now().Sub(sm.lastTransition) < sm.cfg.MinDwellTime {
-        return
+        return false
     }
     sm.openedAt = sm.now()
     sm.setState(StateOpen)
+    return true
 }
+
 // OnHalfOpenSuccess records a successful probe request and transitions the
 // circuit from Half-Open to Closed. It is a no-op if not in Half-Open state.
-func (sm *StateMachine) OnHalfOpenSuccess() {
+func (sm *StateMachine) OnHalfOpenSuccess() bool {
     sm.mu.Lock()
     defer sm.mu.Unlock()
     if sm.state != StateHalfOpen {
-        return
+        return false
     }
     sm.setState(StateClosed)
+    return true
 }
+
 // OnHalfOpenFailure records a failed probe request and transitions the circuit
 // from Half-Open back to Open. It is a no-op if not in Half-Open state.
-func (sm *StateMachine) OnHalfOpenFailure() {
+func (sm *StateMachine) OnHalfOpenFailure() bool {
     sm.mu.Lock()
     defer sm.mu.Unlock()
     if sm.state != StateHalfOpen {
-        return
+        return false
     }
     sm.openedAt = sm.now()
     sm.setState(StateOpen)
+    return true
 }
+
 // setState updates the circuit state and records the transition timestamp.
 // It must be called with sm.mu held.
 func (sm *StateMachine) setState(next State) {

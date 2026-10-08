@@ -33,21 +33,21 @@ type Counts struct {
 	TotalSuccesses       uint32
 	TotalFailures        uint32
 	ConsecutiveSuccesses uint32
-	ConsecutiveFailures	 uint32
+	ConsecutiveFailures  uint32
 }
 
 // Snapshot is a point-in-time read-only view of the circuit breaker's internal signal
 type Snapshot struct {
-	State	State
-	St		float64 // current ewma latency
-	Pt		float64 // current rolling percentile 
-	Dt 		float64 // degradation ratio
-	ThetaT	float64 // current adaptive threshold
-	Sbase	float64 // healthy state ewma baseline
-	Pbase 	float64 // healthy state percentile baseline
-	FailureRate float64 // current failure rate in observation window
-	DegradedRequests int64 // request classified as slow 
-	IsWarmingUp	bool // true if baseline has not yet been capture
+	State            State
+	St               float64 // current ewma latency
+	Pt               float64 // current rolling percentile
+	Dt               float64 // degradation ratio
+	ThetaT           float64 // current adaptive threshold
+	Sbase            float64 // healthy state ewma baseline
+	Pbase            float64 // healthy state percentile baseline
+	FailureRate      float64 // current failure rate in observation window
+	DegradedRequests int64   // request classified as slow
+	IsWarmingUp      bool    // true if baseline has not yet been captured
 }
 
 // CircuitBreaker is the main entry point of fluxgo. It orchestrates all
@@ -55,63 +55,64 @@ type Snapshot struct {
 // BaselineEstimator, AdaptiveThresholdCalculator, StateMachine) behind
 // an API compatible with gobreaker.
 type CircuitBreaker struct {
-	name	string
-	cfg		Config
+	name          string
+	cfg           Config
 	onStateChange func(name string, from State, to State)
 
-	ewma	*EWMA
-	rolling *RollingPercentile
-	collector	*MetricCollector
-	estimator	*BaselineEstimator
-	calculator	*AdaptiveThresholdCalculator
-	machine		*StateMachine
+	ewma       *EWMA
+	rolling    *RollingPercentile
+	collector  *MetricCollector
+	estimator  *BaselineEstimator
+	calculator *AdaptiveThresholdCalculator
+	machine    *StateMachine
 
 	consecutiveSuccesses int64
-	consecutiveFailures	int64
+	consecutiveFailures  int64
 }
 
 // NewCircuitBreaker returns a CircuitBreaker wired and ready to use.
+// It panics if s.Config is invalid.
 func NewCircuitBreaker(s Settings) *CircuitBreaker {
-    if err := s.Config.Validate(); err != nil {
-        panic("fluxgo: invalid config: " + err.Error())
-    }
-	
-    cfg := s.Config
-    ewma    := NewEWMA(cfg.Alpha)
-    rolling := NewRollingPercentile(cfg.WindowSize)
-    return &CircuitBreaker{
-        name:          s.Name,
-        cfg:           cfg,
-        onStateChange: s.OnStateChange,
-        ewma:          ewma,
-        rolling:       rolling,
-        collector:     NewMetricCollector(ewma, rolling),
-        estimator:     NewBaselineEstimator(cfg),
-        calculator:    NewAdaptiveThresholdCalculator(cfg),
-        machine:       NewStateMachine(cfg),
-    }
+	return newCircuitBreakerWithClock(s, time.Now)
+}
+
+// newCircuitBreakerWithClock returns a CircuitBreaker whose warm-up and state
+// machine use the given clock, used by tests to control time without sleeping.
+func newCircuitBreakerWithClock(s Settings, now func() time.Time) *CircuitBreaker {
+	if err := s.Config.Validate(); err != nil {
+		panic("fluxgo: invalid config: " + err.Error())
+	}
+	cfg := s.Config
+	ewma := NewEWMA(cfg.Alpha)
+	rolling := NewRollingPercentile(cfg.WindowSize)
+	return &CircuitBreaker{
+		name:          s.Name,
+		cfg:           cfg,
+		onStateChange: s.OnStateChange,
+		ewma:          ewma,
+		rolling:       rolling,
+		collector:     NewMetricCollector(ewma, rolling, NewOutcomeWindow(cfg.WindowSize)),
+		estimator:     newBaselineEstimatorWithClock(cfg, now),
+		calculator:    NewAdaptiveThresholdCalculator(cfg),
+		machine:       newStateMachineWithClock(cfg, now),
+	}
 }
 
 // Execute runs the given request if the circuit breaker allows it.
 // It returns ErrOpenState if the circuit is open. The signature is
 // compatible with gobreaker.
-func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error){
-	before := cb.machine.State()
-
-	if !cb.machine.AllowRequest(){
+func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
+	allowed, toHalfOpen := cb.machine.AllowRequest()
+	if !allowed {
 		return nil, ErrOpenState
 	}
-
-	// AllowRequest may have triggered Open to HalfOpen
-	cb.notifyIfChanged(before, cb.machine.State())
-	before = cb.machine.State()
+	if toHalfOpen {
+		cb.handleTransition(StateOpen, StateHalfOpen)
+	}
 
 	start := time.Now()
 	result, err := req()
-	latency := time.Since(start)
-
-	cb.onRequestComplete(latency, err == nil)
-	cb.notifyIfChanged(before, cb.machine.State())
+	cb.onRequestComplete(time.Since(start), err == nil)
 
 	return result, err
 }
@@ -123,14 +124,14 @@ func (cb *CircuitBreaker) State() State {
 
 // Counts returns a snapshot of the request counter
 func (cb *CircuitBreaker) Counts() Counts {
-	total	:= cb.collector.TotalRequests()
-	failures	:= cb.collector.TotalFailures()
+	total := cb.collector.TotalRequests()
+	failures := cb.collector.TotalFailures()
 	return Counts{
-		Requests:			uint32(total),
-		TotalSuccesses: 	uint32(total - failures),
-		TotalFailures: 		uint32(failures),
-		ConsecutiveSuccesses: 	uint32(atomic.LoadInt64(&cb.consecutiveSuccesses)),
-		ConsecutiveFailures: 	uint32(atomic.LoadInt64(&cb.consecutiveFailures)),
+		Requests:             uint32(total),
+		TotalSuccesses:       uint32(total - failures),
+		TotalFailures:        uint32(failures),
+		ConsecutiveSuccesses: uint32(atomic.LoadInt64(&cb.consecutiveSuccesses)),
+		ConsecutiveFailures:  uint32(atomic.LoadInt64(&cb.consecutiveFailures)),
 	}
 }
 
@@ -138,13 +139,7 @@ func (cb *CircuitBreaker) Counts() Counts {
 // signals for observability purposes (NF4). It is safe to call concurrently.
 func (cb *CircuitBreaker) Snapshot() Snapshot {
 	St := cb.ewma.Value()
-	p95, p99 := cb.rolling.Current()
-	var Pt float64
-	if cb.cfg.PercentileTarget == 99 {
-		Pt = p99
-	} else {
-		Pt = p95
-	}
+	Pt := cb.selectPercentile(cb.rolling.Current())
 	Sbase, Pbase := cb.estimator.Baseline()
 
 	var Dt float64
@@ -162,29 +157,24 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 		Pbase:            Pbase,
 		FailureRate:      cb.collector.FailureRate(),
 		DegradedRequests: cb.collector.DegradedRequests(),
-		IsWarmingUp:      cb.estimator.IsWarmingUp(),	
+		IsWarmingUp:      cb.estimator.IsWarmingUp(),
 	}
 }
 
-// onRequestComplete orchestrates the post-request desicion pipeline:
-// record metrics, attempt baseline capture if warming up, or evaluate
-// the adaptive threshold and notify the state machine
+// onRequestComplete runs the post-request decision pipeline: classify slow
+// requests, record metrics, feed the baseline estimator, and evaluate the
+// state machine against the current threshold.
 func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool) {
+	latencyMs := latency.Seconds() * 1000
+
 	if !cb.estimator.IsWarmingUp() {
-		ptPrev95, ptPrev99 := cb.rolling.Current()
-		var ptPrev float64
-		if cb.cfg.PercentileTarget == 99 {
-			ptPrev = ptPrev99
-		} else {
-			ptPrev = ptPrev95
-		}
-		if ptPrev > 0 && float64(latency.Milliseconds()) > ptPrev*cb.cfg.SlowRequestMargin {
+		ptPrev := cb.selectPercentile(cb.rolling.Current())
+		if ptPrev > 0 && latencyMs > ptPrev*cb.cfg.SlowRequestMargin {
 			success = false
 			cb.collector.RecordDegraded()
 		}
 	}
 
-	// Record AFTER classification so rolling window gets updated after snapshot.
 	p95, p99 := cb.collector.Record(latency, success)
 	if success {
 		atomic.StoreInt64(&cb.consecutiveFailures, 0)
@@ -195,35 +185,48 @@ func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool)
 	}
 
 	St := cb.ewma.Value()
-	var Pt float64
-	if cb.cfg.PercentileTarget == 99 {
-		Pt = p99
-	} else {
-		Pt = p95
-	}
-	fr := cb.collector.FailureRate()
+	Pt := cb.selectPercentile(p95, p99)
+	fr, n := cb.collector.WindowStats()
+	state := cb.machine.State()
 
-	if cb.estimator.IsWarmingUp() {
-		cb.estimator.TryCapture(St, Pt, fr)
-		return
+	if cb.estimator.NeedsCapture() {
+		cb.estimator.Observe(St, Pt, fr, state == StateClosed)
 	}
+
 	Sbase, Pbase := cb.estimator.Baseline()
 	thetaT := cb.calculator.Calculate(St, Pt, Sbase, Pbase)
-	state := cb.machine.State()
-	switch {
-	case state == StateHalfOpen && success:
-		cb.machine.OnHalfOpenSuccess()
-	case state == StateHalfOpen && !success:
-		cb.machine.OnHalfOpenFailure()
-	case state == StateClosed:
-		cb.machine.EvaluateClosed(fr, thetaT)
+
+	switch state {
+	case StateHalfOpen:
+		if success {
+			if cb.machine.OnHalfOpenSuccess() {
+				cb.handleTransition(StateHalfOpen, StateClosed)
+			}
+		} else if cb.machine.OnHalfOpenFailure() {
+			cb.handleTransition(StateHalfOpen, StateOpen)
+		}
+	case StateClosed:
+		if n >= cb.cfg.MinRequests && cb.machine.EvaluateClosed(fr, thetaT) {
+			cb.handleTransition(StateClosed, StateOpen)
+		}
 	}
 }
 
+// handleTransition resets the outcome window and consecutive counters after
+// a state transition, then fires the OnStateChange callback if one is set.
+func (cb *CircuitBreaker) handleTransition(from, to State) {
+	cb.collector.ResetWindow()
+	atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
+	atomic.StoreInt64(&cb.consecutiveFailures, 0)
+	if cb.onStateChange != nil {
+		cb.onStateChange(cb.name, from, to)
+	}
+}
 
-// notifyIfChanged fires the OnStateChange callback if the state changed.
-func (cb *CircuitBreaker) notifyIfChanged(from, to State) {
-    if cb.onStateChange != nil && from != to {
-        cb.onStateChange(cb.name, from, to)
-    }
+// selectPercentile returns p99 when PercentileTarget is 99 and p95 otherwise.
+func (cb *CircuitBreaker) selectPercentile(p95, p99 float64) float64 {
+	if cb.cfg.PercentileTarget == 99 {
+		return p99
+	}
+	return p95
 }
