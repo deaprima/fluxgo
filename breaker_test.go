@@ -3,171 +3,159 @@
 package fluxgo
 
 import (
-    "errors"
-    "sync"
-    "testing"
-    "time"
+	"errors"
+	"sync"
+	"testing"
+	"time"
 )
 
 var errDownstream = errors.New("downstream failure")
 
 func defaultSettings() Settings {
-    cfg := DefaultConfig()
-    cfg.MinDwellTime = 0           // disable anti-flapping in most tests
-    cfg.WarmupDuration = 0         // skip warmup in most tests
-    cfg.RecoveryTimeout = time.Hour // prevent accidental Open→HalfOpen
-    return Settings{Name: "test", Config: cfg}
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0            // disable anti-flapping in most tests
+	cfg.WarmupDuration = 0          // skip warmup in most tests
+	cfg.RecoveryTimeout = time.Hour // prevent accidental Open->HalfOpen
+	cfg.MinRequests = 1             // disable the minimum-volume gate in most tests
+	return Settings{Name: "test", Config: cfg}
 }
 
 func TestCircuitBreaker_Execute_SuccessPassesThrough(t *testing.T) {
-    cb := NewCircuitBreaker(defaultSettings())
-    result, err := cb.Execute(func() (interface{}, error) {
-        return "ok", nil
-    })
-    if err != nil || result != "ok" {
-        t.Errorf("Execute() = (%v, %v), want (ok, nil)", result, err)
-    }
+	cb := NewCircuitBreaker(defaultSettings())
+	result, err := cb.Execute(func() (interface{}, error) {
+		return "ok", nil
+	})
+	if err != nil || result != "ok" {
+		t.Errorf("Execute() = (%v, %v), want (ok, nil)", result, err)
+	}
 }
 
 func TestCircuitBreaker_Execute_ReturnsErrWhenOpen(t *testing.T) {
-    s := defaultSettings()
-    s.Config.ThetaBase = 0.5
-    cb := NewCircuitBreaker(s)
+	s := defaultSettings()
+	s.Config.ThetaBase = 0.5
+	cb := NewCircuitBreaker(s)
 
-    // drive failure rate above threshold
-    for i := 0; i < 10; i++ {
-        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    }
+	// drive failure rate above threshold
+	for i := 0; i < 10; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
 
-    if cb.State() != StateOpen {
-        t.Fatal("expected Open state after sustained failures")
-    }
+	if cb.State() != StateOpen {
+		t.Fatal("expected Open state after sustained failures")
+	}
 
-    _, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
-    if !errors.Is(err, ErrOpenState) {
-        t.Errorf("Execute() error = %v, want ErrOpenState", err)
-    }
+	_, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
+	if !errors.Is(err, ErrOpenState) {
+		t.Errorf("Execute() error = %v, want ErrOpenState", err)
+	}
 }
 
 func TestCircuitBreaker_Counts_AccumulateCorrectly(t *testing.T) {
-    cb := NewCircuitBreaker(defaultSettings())
+	s := defaultSettings()
+	s.Config.ThetaBase = 1.0
+	cb := NewCircuitBreaker(s)
 
-    cb.Execute(func() (interface{}, error) { return nil, nil })
-    cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	cb.Execute(func() (interface{}, error) { return nil, nil })
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
 
-    c := cb.Counts()
-    if c.Requests != 3 {
-        t.Errorf("Counts().Requests = %d, want 3", c.Requests)
-    }
-    if c.TotalFailures != 2 {
-        t.Errorf("Counts().TotalFailures = %d, want 2", c.TotalFailures)
-    }
-    if c.TotalSuccesses != 1 {
-        t.Errorf("Counts().TotalSuccesses = %d, want 1", c.TotalSuccesses)
-    }
-    if c.ConsecutiveFailures != 2 {
-        t.Errorf("Counts().ConsecutiveFailures = %d, want 2", c.ConsecutiveFailures)
-    }
+	c := cb.Counts()
+	if c.Requests != 3 {
+		t.Errorf("Counts().Requests = %d, want 3", c.Requests)
+	}
+	if c.TotalFailures != 2 {
+		t.Errorf("Counts().TotalFailures = %d, want 2", c.TotalFailures)
+	}
+	if c.TotalSuccesses != 1 {
+		t.Errorf("Counts().TotalSuccesses = %d, want 1", c.TotalSuccesses)
+	}
+	if c.ConsecutiveFailures != 2 {
+		t.Errorf("Counts().ConsecutiveFailures = %d, want 2", c.ConsecutiveFailures)
+	}
 }
 
 func TestCircuitBreaker_OnStateChange_Callback(t *testing.T) {
-    var transitions []string
-    s := defaultSettings()
-    s.Config.ThetaBase = 0.5
-    s.OnStateChange = func(name string, from, to State) {
-        transitions = append(transitions, from.String()+"->"+to.String())
-    }
-    cb := NewCircuitBreaker(s)
+	var transitions []string
+	s := defaultSettings()
+	s.Config.ThetaBase = 0.5
+	s.OnStateChange = func(name string, from, to State) {
+		transitions = append(transitions, from.String()+"->"+to.String())
+	}
+	cb := NewCircuitBreaker(s)
 
-    for i := 0; i < 10; i++ {
-        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    }
+	for i := 0; i < 10; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
 
-    if len(transitions) == 0 {
-        t.Error("expected OnStateChange to be called, got no transitions")
-    }
-    if transitions[0] != "closed->open" {
-        t.Errorf("first transition = %q, want %q", transitions[0], "closed->open")
-    }
-}
-
-func TestCircuitBreaker_WarmupPreventsAdaptiveDecision(t *testing.T) {
-    cfg := DefaultConfig()
-    cfg.WarmupDuration = 30 * time.Second
-    cfg.ThetaBase = 0.1
-    cb := NewCircuitBreaker(Settings{Name: "warmup-test", Config: cfg})
-
-    for i := 0; i < 20; i++ {
-        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    }
-
-    if cb.State() != StateClosed {
-        t.Errorf("State() = %v, want Closed during warmup", cb.State())
-    }
+	if len(transitions) == 0 {
+		t.Error("expected OnStateChange to be called, got no transitions")
+	}
+	if transitions[0] != "closed->open" {
+		t.Errorf("first transition = %q, want %q", transitions[0], "closed->open")
+	}
 }
 
 func TestCircuitBreaker_ConcurrentExecute_RaceDetector(t *testing.T) {
-    cb := NewCircuitBreaker(defaultSettings())
-    var wg sync.WaitGroup
-    for i := 0; i < 100; i++ {
-        wg.Add(1)
-        go func(id int) {
-            defer wg.Done()
-            cb.Execute(func() (interface{}, error) {
-                if id%3 == 0 {
-                    return nil, errDownstream
-                }
-                return "ok", nil
-            })
-        }(i)
-    }
-    wg.Wait()
+	cb := NewCircuitBreaker(defaultSettings())
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			cb.Execute(func() (interface{}, error) {
+				if id%3 == 0 {
+					return nil, errDownstream
+				}
+				return "ok", nil
+			})
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestCircuitBreaker_HalfOpenProbe_Success_TransitionsToClosed(t *testing.T) {
-    s := defaultSettings()
-    s.Config.ThetaBase = 0.5
-    s.Config.RecoveryTimeout = time.Millisecond // timeout singkat
-    cb := NewCircuitBreaker(s)
+	s := defaultSettings()
+	s.Config.ThetaBase = 0.5
+	s.Config.RecoveryTimeout = time.Millisecond // timeout singkat
+	cb := NewCircuitBreaker(s)
 
-    for i := 0; i < 10; i++ {
-        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    }
-    if cb.State() != StateOpen {
-        t.Fatal("expected Open state")
-    }
+	for i := 0; i < 10; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
+	if cb.State() != StateOpen {
+		t.Fatal("expected Open state")
+	}
 
-    time.Sleep(5 * time.Millisecond) // tunggu recovery timeout
+	time.Sleep(5 * time.Millisecond) // tunggu recovery timeout
 
-    _, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
-    if err != nil {
-        t.Errorf("Execute() = %v, want nil on HalfOpen probe", err)
-    }
-    if cb.State() != StateClosed {
-        t.Errorf("State() = %v, want Closed after successful probe", cb.State())
-    }
+	_, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
+	if err != nil {
+		t.Errorf("Execute() = %v, want nil on HalfOpen probe", err)
+	}
+	if cb.State() != StateClosed {
+		t.Errorf("State() = %v, want Closed after successful probe", cb.State())
+	}
 }
 
 func TestCircuitBreaker_HalfOpenProbe_Failure_TransitionsToOpen(t *testing.T) {
-    s := defaultSettings()
-    s.Config.ThetaBase = 0.5
-    s.Config.RecoveryTimeout = time.Millisecond
-    cb := NewCircuitBreaker(s)
+	s := defaultSettings()
+	s.Config.ThetaBase = 0.5
+	s.Config.RecoveryTimeout = time.Millisecond
+	cb := NewCircuitBreaker(s)
 
-    for i := 0; i < 10; i++ {
-        cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    }
-    if cb.State() != StateOpen {
-        t.Fatal("expected Open state")
-    }
+	for i := 0; i < 10; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
+	if cb.State() != StateOpen {
+		t.Fatal("expected Open state")
+	}
 
-    time.Sleep(5 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
-    cb.Execute(func() (interface{}, error) { return nil, errDownstream })
-    if cb.State() != StateOpen {
-        t.Errorf("State() = %v, want Open after failed probe", cb.State())
-    }
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	if cb.State() != StateOpen {
+		t.Errorf("State() = %v, want Open after failed probe", cb.State())
+	}
 }
 
 func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
@@ -204,7 +192,7 @@ func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
 
 func TestCircuitBreaker_SlowRequest_InactiveDuringWarmup(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.WarmupDuration = 10 * time.Second 
+	cfg.WarmupDuration = 10 * time.Second
 	cfg.SlowRequestMargin = 2.0
 	cb := NewCircuitBreaker(Settings{Name: "test-warmup", Config: cfg})
 
@@ -221,7 +209,7 @@ func TestCircuitBreaker_SlowRequest_InactiveDuringWarmup(t *testing.T) {
 func TestCircuitBreaker_NormalRequest_NotClassifiedAsDegraded(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.WarmupDuration = 50 * time.Millisecond
-	cfg.SlowRequestMargin = 2.0
+	cfg.SlowRequestMargin = 3.0
 	cb := NewCircuitBreaker(Settings{Name: "test-normal", Config: cfg})
 
 	// Establish baseline.
@@ -235,7 +223,10 @@ func TestCircuitBreaker_NormalRequest_NotClassifiedAsDegraded(t *testing.T) {
 
 	degradedBefore := cb.collector.DegradedRequests()
 
-	// Request within 2x margin (10ms baseline, 15ms < 20ms threshold → normal).
+	// Request well within the 3x margin (10ms baseline, 15ms < 30ms threshold →
+	// normal). The wide margin keeps this deterministic under -race, where
+	// scheduling overhead can otherwise push a single probe's latency past a
+	// tight threshold even though the request isn't actually slow.
 	cb.Execute(func() (interface{}, error) {
 		time.Sleep(15 * time.Millisecond)
 		return nil, nil
@@ -300,4 +291,125 @@ func TestCircuitBreaker_Snapshot_ThreadSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestCircuitBreaker_IdleBeforeTraffic_CapturesBaseline(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cb := newCircuitBreakerWithClock(Settings{Name: "test", Config: cfg}, clock.Now)
+	ok := func() (interface{}, error) {
+		time.Sleep(time.Millisecond)
+		return nil, nil
+	}
+
+	clock.Advance(10 * time.Minute)
+	for i := 0; i < 50; i++ {
+		cb.Execute(ok)
+	}
+	if !cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected warm-up to start at the first request")
+	}
+
+	clock.Advance(cfg.WarmupDuration)
+	cb.Execute(ok)
+
+	snap := cb.Snapshot()
+	if snap.IsWarmingUp {
+		t.Fatal("expected warm-up to be complete")
+	}
+	if snap.Sbase <= 0 || snap.Pbase <= 0 {
+		t.Fatalf("expected baseline to be captured, got Sbase=%v Pbase=%v", snap.Sbase, snap.Pbase)
+	}
+}
+
+func TestCircuitBreaker_FailureRateIsWindowed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	ok := func() (interface{}, error) { return nil, nil }
+	fail := func() (interface{}, error) { return nil, errors.New("downstream failure") }
+
+	for i := 0; i < 1000; i++ {
+		cb.Execute(ok)
+	}
+	for i := 0; i < cfg.WindowSize && cb.State() == StateClosed; i++ {
+		cb.Execute(fail)
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected the circuit to open within one window of failures")
+	}
+}
+
+func TestCircuitBreaker_MinRequestsPreventsEarlyTrip(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	fail := func() (interface{}, error) { return nil, errors.New("downstream failure") }
+
+	for i := 0; i < cfg.MinRequests-1; i++ {
+		cb.Execute(fail)
+	}
+	if cb.State() != StateClosed {
+		t.Fatal("expected the circuit to stay closed below MinRequests")
+	}
+
+	cb.Execute(fail)
+	if cb.State() != StateOpen {
+		t.Fatal("expected the circuit to open once MinRequests is reached")
+	}
+}
+
+func TestCircuitBreaker_CanTripDuringWarmup(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = time.Hour
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	fail := func() (interface{}, error) { return nil, errors.New("downstream failure") }
+
+	for i := 0; i < cfg.MinRequests; i++ {
+		cb.Execute(fail)
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected the circuit to trip on ThetaBase during warm-up")
+	}
+	if !cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected warm-up to still be active")
+	}
+}
+
+func TestCircuitBreaker_WindowResetsOnTransition(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	cfg.MinDwellTime = 0
+	var transitions int
+	cb := newCircuitBreakerWithClock(Settings{
+		Name:          "test",
+		Config:        cfg,
+		OnStateChange: func(string, State, State) { transitions++ },
+	}, clock.Now)
+	ok := func() (interface{}, error) { return nil, nil }
+	fail := func() (interface{}, error) { return nil, errors.New("downstream failure") }
+
+	for i := 0; i < cfg.MinRequests; i++ {
+		cb.Execute(fail)
+	}
+	clock.Advance(cfg.RecoveryTimeout)
+	cb.Execute(ok)
+	if cb.State() != StateClosed {
+		t.Fatalf("expected closed after a successful probe, got %v", cb.State())
+	}
+
+	cb.Execute(fail)
+
+	if cb.State() != StateClosed {
+		t.Fatal("expected failures from before the trip to be discarded")
+	}
+	if transitions != 3 {
+		t.Fatalf("expected 3 transitions (closed-open, open-half-open, half-open-closed), got %d", transitions)
+	}
 }

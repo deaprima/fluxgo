@@ -58,7 +58,7 @@ func TestStateMachine_OpenToHalfOpen_AfterRecoveryTimeout(t *testing.T) {
     sm.EvaluateClosed(0.7, 0.6) // → Open
     advance(cfg.RecoveryTimeout + time.Second)
 
-    if allowed := sm.AllowRequest(); !allowed {
+    if allowed, _ := sm.AllowRequest(); !allowed {
         t.Error("AllowRequest() = false, want true after RecoveryTimeout (should be HalfOpen)")
     }
     if got := sm.State(); got != StateHalfOpen {
@@ -74,7 +74,7 @@ func TestStateMachine_OpenRejectsRequests_BeforeRecoveryTimeout(t *testing.T) {
 
     sm.EvaluateClosed(0.7, 0.6) // → Open
 
-    if allowed := sm.AllowRequest(); allowed {
+    if allowed, _ := sm.AllowRequest(); allowed {
         t.Error("AllowRequest() = true, want false while Open before RecoveryTimeout")
     }
 }
@@ -174,5 +174,25 @@ func TestStateMachine_OnHalfOpenFailure_NoopWhenNotHalfOpen(t *testing.T) {
     sm.OnHalfOpenFailure() 
     if sm.State() != StateClosed {
         t.Errorf("State() = %v, want Closed (no-op)", sm.State())
+    }
+}
+
+func TestStateMachine_AllowRequest_ReportsTransitionOccurred(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.MinDwellTime = 0
+    now, advance := smClock(time.Now())
+    sm := newStateMachineWithClock(cfg, now)
+
+    sm.EvaluateClosed(0.7, 0.6) // → Open
+    advance(cfg.RecoveryTimeout + time.Second)
+
+    allowed, transitioned := sm.AllowRequest()
+    if !allowed || !transitioned {
+        t.Fatalf("AllowRequest() = (%v, %v), want (true, true) on Open->HalfOpen", allowed, transitioned)
+    }
+
+    allowed, transitioned = sm.AllowRequest()
+    if !allowed || transitioned {
+        t.Fatalf("AllowRequest() = (%v, %v), want (true, false) when already HalfOpen", allowed, transitioned)
     }
 }

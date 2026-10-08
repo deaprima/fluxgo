@@ -11,17 +11,22 @@ import (
 // BaselineEstimator tracks the warm-up period and captures a healthy-state
 // baseline (Sbase, Pbase) for use by AdaptiveThresholdCalculator.
 //
-// The estimator moves through three phases:
-//  1. Warmup active: IsWarmingUp() returns true; TryCapture waits for healthy conditions.
-//  2. Valid capture: conditions were good; baseline is locked and IsWarmingUp() returns false.
-//  3. Fallback: warmup expired without a valid capture; current signals are stored
-//     as a best-effort baseline (producing theta_t ≈ theta_base, equivalent to a
-//     static gobreaker threshold), and re-capture continues on subsequent calls.
+// The warm-up period starts at the first observation rather than at
+// construction, so a circuit breaker that stays idle after startup still
+// performs a full warm-up once traffic arrives. The estimator moves through
+// three phases:
+//  1. Warm-up: no baseline is set; IsWarmingUp returns true.
+//  2. Fallback: warm-up ended while conditions were unhealthy; the current
+//     signals are stored as a best-effort baseline and Observe keeps
+//     trying to replace it with a valid capture.
+//  3. Valid capture: the baseline is locked and Observe becomes a no-op.
 type BaselineEstimator struct {
     cfg       Config
-    startTime time.Time
     now       func() time.Time
+
     mu           sync.RWMutex
+    started      bool
+    startTime    time.Time
     sbase        float64
     pbase        float64
     validCapture bool
@@ -52,39 +57,49 @@ func (b *BaselineEstimator) IsWarmingUp() bool {
     if b.validCapture || b.fallback {
         return false
     }
+    if !b.started {
+        return true
+    }
     return b.now().Sub(b.startTime) < b.cfg.WarmupDuration
 }
 
-// TryCapture attempts to record St and Pt as the healthy-state baseline.
-// A capture is accepted only when currentFailureRate is below WarmupMaxFailRate
-// and both signal values are positive.
-//
-// If the warmup window expires before any valid capture, the current signals are
-// stored as a best-effort fallback (making theta_t ≈ theta_base). Re-capture
-// continues on subsequent calls and upgrades the baseline when conditions improve.
-func (b *BaselineEstimator) TryCapture(St, Pt, currentFailureRate float64) {
-    if St <= 0 || Pt <= 0 {
-        return // no usable signal data yet
-    }
+// NeedsCapture reports whether the estimator still accepts observations.
+// it returns true until a valid baseline has been capture
+func (b *BaselineEstimator) NeedsCapture() bool {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return !b.validCapture
+}
+
+// Observe feeds the current signals to the estimator. The first call starts the warm-up clock
+func (b *BaselineEstimator) Observe(St, Pt, failureRate float64, closed bool) {
     b.mu.Lock()
     defer b.mu.Unlock()
-    conditionsGood := currentFailureRate < b.cfg.WarmupMaxFailRate
-    if conditionsGood {
-        b.sbase = St
-        b.pbase = Pt
-        b.validCapture = true
-        b.fallback = false // upgrade from fallback if previously set
+    if b.validCapture{
         return
     }
-    // warmup expired without a valid capture: store current signals as fallback
-    if !b.validCapture && !b.fallback {
-        if b.now().Sub(b.startTime) >= b.cfg.WarmupDuration {
-            b.sbase = St
-            b.pbase = Pt
-            b.fallback = true
-        }
+
+    if !b.started {
+        b.started = true
+        b.startTime = b.now()
+    }
+
+    if b.now().Sub(b.startTime) < b.cfg.WarmupDuration {
+        return
+    }
+
+    if closed && failureRate < b.cfg.WarmupMaxFailRate {
+        b.sbase, b.pbase = St, Pt
+        b.validCapture = true
+        b.fallback  = false
+        return
+    }
+    if !b.fallback {
+        b.sbase, b.pbase = St, Pt
+        b.fallback = true
     }
 }
+
 // Baseline returns the current Sbase and Pbase values.
 // Returns (0, 0) if no capture or fallback has occurred yet.
 func (b *BaselineEstimator) Baseline() (sbase, pbase float64) {

@@ -102,3 +102,24 @@ func TestValidate_SlowRequestMargin_Negative(t *testing.T) {
 		t.Error("expected error for SlowRequestMargin = -1.0, got nil")
 	}
 }
+
+func TestDefaultConfig_MinRequests(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.MinRequests != 20 {
+		t.Errorf("DefaultConfig().MinRequests = %d, want 20", cfg.MinRequests)
+	}
+}
+
+func TestValidateRejectsMinRequestsOutOfRange(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinRequests = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for MinRequests = 0, got nil")
+	}
+
+	cfg = DefaultConfig()
+	cfg.MinRequests = cfg.WindowSize + 1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for MinRequests > WindowSize, got nil")
+	}
+}

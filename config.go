@@ -49,6 +49,11 @@ type Config struct {
 	// used to prevent rapid oscillation (anti-flapping).
 	MinDwellTime time.Duration
 
+	// MinRequests is the minimum number of requests that must be present in
+	// the outcome window before the failure rate is evaluated against the
+	// threshold. It must be between 1 and WindowSize. Default: 20.
+	MinRequests int
+
 	// SlowRequestMargin is the multiplier applied to the current rolling percentile
 	// to classify a request as degraded.
 	// Must be greater than zero. Default: 2.0.
@@ -75,6 +80,7 @@ func DefaultConfig() Config {
 		WarmupMaxFailRate: 0.05,
 		RecoveryTimeout:   60 * time.Second,
 		MinDwellTime:      5 * time.Second,
+		MinRequests:       20,
 		SlowRequestMargin: 2.0,
 		RandomSeed:        0,
 	}
@@ -87,6 +93,9 @@ func (c Config) Validate() error {
 	}
 	if c.WindowSize <= 0 {
 		return errors.New("window size must be greater than zero")
+	}
+	if c.MinRequests < 1 || c.MinRequests > c.WindowSize {
+		return errors.New("min requests must be in the range [1, window size]")
 	}
 	if c.PercentileTarget != 95 && c.PercentileTarget != 99 {
 		return errors.New("percentile target must be 95 or 99")
@@ -104,7 +113,7 @@ func (c Config) Validate() error {
 		return errors.New("theta base must be in the range (0, 1]")
 	}
 	if c.WarmupDuration < 0 {
-   		return errors.New("warmup duration must be non-negative")
+		return errors.New("warmup duration must be non-negative")
 	}
 	if c.RecoveryTimeout <= 0 {
 		return errors.New("recovery timeout must be greater than zero")
