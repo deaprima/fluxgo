@@ -10,12 +10,12 @@ import (
 // fakeClock is a manually advanced clock for deterministic time-based tests
 type fakeClock struct {
 	mu sync.Mutex
-	t time.Time
+	t  time.Time
 }
 
 // newFakeClock returns a fakeClock starting at the Unix epoch
 func newFakeClock() *fakeClock {
-	return &fakeClock{t: time.Unix(0,0)}
+	return &fakeClock{t: time.Unix(0, 0)}
 }
 
 // Now returns the current fake time
@@ -23,7 +23,7 @@ func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.t
-} 
+}
 
 // Advance moves the fake time forward by d
 func (c *fakeClock) Advance(d time.Duration) {

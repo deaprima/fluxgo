@@ -32,8 +32,8 @@ func (a *AdaptiveThresholdCalculator) Calculate(St, Pt, Sbase, Pbase float64) fl
 		return a.cfg.ThetaBase
 	}
 
-	rEWMA := St/Sbase
-	rP := Pt/Pbase
+	rEWMA := St / Sbase
+	rP := Pt / Pbase
 	Dt := a.cfg.W1*rEWMA + a.cfg.W2*rP
 
 	if Dt <= 0 {

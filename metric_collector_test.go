@@ -8,12 +8,16 @@ import (
 	"time"
 )
 
-func TestMetricCollector_Record_CountsAccumulate(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
+func newTestCollector(size int) *MetricCollector {
+	return NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(size), NewOutcomeWindow(size))
+}
 
-	mc.Record(10*time.Millisecond, true)
-	mc.Record(20*time.Millisecond, false)
-	mc.Record(30*time.Millisecond, false)
+func TestMetricCollector_RecordOutcome_CountsAccumulate(t *testing.T) {
+	mc := newTestCollector(10)
+
+	mc.RecordOutcome(0, true)
+	mc.RecordOutcome(0, false)
+	mc.RecordOutcome(0, false)
 
 	if got := mc.TotalRequests(); got != 3 {
 		t.Errorf("TotalRequests() = %d, want 3", got)
@@ -23,16 +27,43 @@ func TestMetricCollector_Record_CountsAccumulate(t *testing.T) {
 	}
 }
 
+func TestMetricCollector_RecordLatency_FeedsSignals(t *testing.T) {
+	mc := newTestCollector(10)
+
+	p95, p99 := mc.RecordLatency(20 * time.Millisecond)
+
+	if got := mc.ewma.Value(); got != 20 {
+		t.Errorf("EWMA value = %v, want 20", got)
+	}
+	if p95 != 20 || p99 != 20 {
+		t.Errorf("RecordLatency() = (%v, %v), want (20, 20)", p95, p99)
+	}
+	if got := mc.TotalRequests(); got != 0 {
+		t.Errorf("TotalRequests() = %d, want 0 (latency must not touch outcome counters)", got)
+	}
+}
+
+func TestMetricCollector_RecordOutcome_DoesNotTouchSignals(t *testing.T) {
+	mc := newTestCollector(10)
+
+	mc.RecordOutcome(0, false)
+
+	if got := mc.ewma.Value(); got != 0 {
+		t.Errorf("EWMA value = %v, want 0 (outcome must not touch latency signals)", got)
+	}
+}
+
 func TestMetricCollector_FailureRate_ZeroWhenNoRequests(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
+	mc := newTestCollector(10)
 	if got := mc.FailureRate(); got != 0 {
 		t.Errorf("FailureRate() = %f, want 0 (no requests)", got)
 	}
 }
 
 func TestMetricCollector_Reset_ClearsCounters(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
-	mc.Record(10*time.Millisecond, false)
+	mc := newTestCollector(10)
+	mc.RecordLatency(10 * time.Millisecond)
+	mc.RecordOutcome(0, false)
 	mc.Reset()
 
 	if got := mc.TotalRequests(); got != 0 {
@@ -41,22 +72,29 @@ func TestMetricCollector_Reset_ClearsCounters(t *testing.T) {
 	if got := mc.FailureRate(); got != 0 {
 		t.Errorf("FailureRate() after Reset = %f, want 0", got)
 	}
+	if got := mc.ewma.Value(); got != 0 {
+		t.Errorf("EWMA value after Reset = %v, want 0", got)
+	}
 }
 
 func TestMetricCollector_ConcurrentRecord_RaceDetector(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(100), NewOutcomeWindow(100))
+	mc := newTestCollector(100)
 	const goroutines = 50
 	const recordsEach = 100
 
 	var wg sync.WaitGroup
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
-		go func(id int) {
+		go func() {
 			defer wg.Done()
 			for j := 0; j < recordsEach; j++ {
-				mc.Record(time.Duration(j+1)*time.Millisecond, j%5 != 0)
+				success := j%5 != 0
+				if success {
+					mc.RecordLatency(time.Duration(j+1) * time.Millisecond)
+				}
+				mc.RecordOutcome(0, success)
 			}
-		}(i)
+		}()
 	}
 	wg.Wait()
 
@@ -67,10 +105,10 @@ func TestMetricCollector_ConcurrentRecord_RaceDetector(t *testing.T) {
 }
 
 func TestMetricCollector_RecordDegraded_Counter(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
+	mc := newTestCollector(10)
 
-	mc.Record(10*time.Millisecond, false) // explicit failure
-	mc.RecordDegraded()                   // slow request (also counted as failure by caller)
+	mc.RecordOutcome(0, false)
+	mc.RecordDegraded()
 
 	if got := mc.DegradedRequests(); got != 1 {
 		t.Errorf("DegradedRequests() = %d, want 1", got)
@@ -81,7 +119,7 @@ func TestMetricCollector_RecordDegraded_Counter(t *testing.T) {
 }
 
 func TestMetricCollector_Reset_ClearsDegradedCounter(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
+	mc := newTestCollector(10)
 	mc.RecordDegraded()
 	mc.RecordDegraded()
 	mc.Reset()
@@ -95,13 +133,13 @@ func TestMetricCollector_Reset_ClearsDegradedCounter(t *testing.T) {
 // FailureRate must reflect only the outcome window, not the lifetime total.
 func TestMetricCollector_FailureRate_IsWindowed(t *testing.T) {
 	const windowSize = 10
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(windowSize), NewOutcomeWindow(windowSize))
+	mc := newTestCollector(windowSize)
 
 	for i := 0; i < 100; i++ {
-		mc.Record(time.Millisecond, true) // 100 lifetime successes
+		mc.RecordOutcome(0, true)
 	}
 	for i := 0; i < windowSize; i++ {
-		mc.Record(time.Millisecond, false) // fills the window with failures only
+		mc.RecordOutcome(0, false)
 	}
 
 	if got := mc.FailureRate(); got != 1.0 {
@@ -112,16 +150,16 @@ func TestMetricCollector_FailureRate_IsWindowed(t *testing.T) {
 	}
 }
 
-func TestMetricCollector_ResetWindow_PreservesLatencySignals(t *testing.T) {
-	mc := NewMetricCollector(NewEWMA(0.3), NewRollingPercentile(10), NewOutcomeWindow(10))
-	mc.Record(50*time.Millisecond, false)
+func TestMetricCollector_AdvanceWindow_PreservesLifetimeCounters(t *testing.T) {
+	mc := newTestCollector(10)
+	mc.RecordOutcome(0, false)
 
-	mc.ResetWindow()
+	mc.AdvanceWindow(1)
 
 	if rate, n := mc.WindowStats(); rate != 0 || n != 0 {
-		t.Errorf("WindowStats() after ResetWindow = (%v, %d), want (0, 0)", rate, n)
+		t.Errorf("WindowStats() after AdvanceWindow = (%v, %d), want (0, 0)", rate, n)
 	}
 	if got := mc.TotalRequests(); got != 1 {
-		t.Errorf("TotalRequests() after ResetWindow = %d, want 1 (lifetime counters must be preserved)", got)
+		t.Errorf("TotalRequests() after AdvanceWindow = %d, want 1 (lifetime counters must be preserved)", got)
 	}
 }

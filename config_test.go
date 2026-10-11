@@ -2,6 +2,7 @@
 package fluxgo
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -121,5 +122,68 @@ func TestValidateRejectsMinRequestsOutOfRange(t *testing.T) {
 	cfg.MinRequests = cfg.WindowSize + 1
 	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for MinRequests > WindowSize, got nil")
+	}
+}
+
+func TestDefaultConfig_HalfOpenMaxRequests(t *testing.T) {
+	if got := DefaultConfig().HalfOpenMaxRequests; got != 1 {
+		t.Errorf("DefaultConfig().HalfOpenMaxRequests = %d, want 1", got)
+	}
+}
+
+func TestValidateRejectsHalfOpenMaxRequestsBelowOne(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HalfOpenMaxRequests = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for HalfOpenMaxRequests = 0, got nil")
+	}
+}
+
+func TestValidateRejectsThetaMaxAboveOne(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ThetaMax = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for ThetaMax = 1.5, got nil")
+	}
+}
+
+func TestValidateRejectsNonPositiveThetaMin(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ThetaMin = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for ThetaMin = 0, got nil")
+	}
+}
+
+func TestValidateRejectsWarmupMaxFailRateOutOfRange(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarmupMaxFailRate = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for WarmupMaxFailRate = 0, got nil")
+	}
+
+	cfg = DefaultConfig()
+	cfg.WarmupMaxFailRate = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for WarmupMaxFailRate = 1.5, got nil")
+	}
+}
+
+func TestValidateRejectsNaN(t *testing.T) {
+	fields := map[string]func(*Config){
+		"Alpha":             func(c *Config) { c.Alpha = math.NaN() },
+		"W1":                func(c *Config) { c.W1 = math.NaN() },
+		"ThetaBase":         func(c *Config) { c.ThetaBase = math.NaN() },
+		"ThetaMin":          func(c *Config) { c.ThetaMin = math.NaN() },
+		"ThetaMax":          func(c *Config) { c.ThetaMax = math.NaN() },
+		"WarmupMaxFailRate": func(c *Config) { c.WarmupMaxFailRate = math.NaN() },
+		"SlowRequestMargin": func(c *Config) { c.SlowRequestMargin = math.NaN() },
+	}
+	for name, set := range fields {
+		cfg := DefaultConfig()
+		set(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected error for %s = NaN, got nil", name)
+		}
 	}
 }
