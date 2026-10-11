@@ -32,6 +32,8 @@ result, err := cb.Execute(func() (interface{}, error) {
 })
 if errors.Is(err, fluxgo.ErrOpenState) {
     // circuit is open — apply fallback
+} else if errors.Is(err, fluxgo.ErrTooManyRequests) {
+    // circuit is half-open and probe quota is saturated
 }
 ```
 
@@ -51,6 +53,8 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `WarmupMaxFailRate` | `0.05` | Max failure rate for a valid warmup capture |
 | `RecoveryTimeout` | `60s` | Time Open before transitioning to Half-Open |
 | `MinDwellTime` | `5s` | Minimum time between state transitions (anti-flapping) |
+| `MinRequests` | `20` | Minimum volume in outcome window before evaluating failure rate |
+| `HalfOpenMaxRequests` | `1` | Max concurrent probe requests admitted while Half-Open |
 | `SlowRequestMargin` | `2.0` | Multiplier on Pt; requests with latency > Pt × margin are classified as degraded. Locked at 2.0. |
 | `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
 
@@ -135,8 +139,8 @@ Benchmark on Intel Core i5-11300H @ 3.10GHz:
 
 | State | Latency/call | Allocations |
 |---|---|---|
-| Closed (full pipeline) | ~1,558 ns | 2 allocs / 1,791 B |
-| Open (fast reject) | ~114 ns | 0 allocs |
+| Closed (full pipeline) | ~1,092 ns | 1 allocs / 895 B |
+| Open (fast reject) | ~128 ns | 0 allocs / 0 B |
 
 ## API Compatibility with gobreaker
 
@@ -147,6 +151,7 @@ Benchmark on Intel Core i5-11300H @ 3.10GHz:
 | `cb.State()` | `cb.State()` | Identical |
 | `cb.Counts()` | `cb.Counts()` | Compatible fields |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |
+| `ErrTooManyRequests` | `ErrTooManyRequests` | Same sentinel error when Half-Open probe quota is reached |
 | — | `cb.Snapshot()` | fluxgo-only: observability accessor |
 
 ## Mode Switching for Testbed (CB_MODE)
