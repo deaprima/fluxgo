@@ -413,3 +413,115 @@ func TestCircuitBreaker_WindowResetsOnTransition(t *testing.T) {
 		t.Fatalf("expected 3 transitions (closed-open, open-half-open, half-open-closed), got %d", transitions)
 	}
 }
+
+func TestCircuitBreaker_HalfOpen_RejectsExcessProbes(t *testing.T) {
+	clock := newFakeClock()
+	s := defaultSettings()
+	cb := newCircuitBreakerWithClock(s, clock.Now)
+
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	if cb.State() != StateOpen {
+		t.Fatal("expected Open state")
+	}
+	clock.Advance(s.Config.RecoveryTimeout)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cb.Execute(func() (interface{}, error) {
+			close(started)
+			<-release
+			return "ok", nil
+		})
+	}()
+	<-started
+
+	_, err := cb.Execute(func() (interface{}, error) { return "ok", nil })
+	if !errors.Is(err, ErrTooManyRequests) {
+		t.Errorf("Execute() error = %v, want ErrTooManyRequests while a probe is in flight", err)
+	}
+
+	close(release)
+	<-done
+	if cb.State() != StateClosed {
+		t.Errorf("State() = %v, want Closed after the probe succeeds", cb.State())
+	}
+}
+
+func TestCircuitBreaker_PanicRecordedAsFailure(t *testing.T) {
+	cb := NewCircuitBreaker(defaultSettings())
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected the panic to propagate to the caller")
+			}
+		}()
+		cb.Execute(func() (interface{}, error) { panic("boom") })
+	}()
+
+	if got := cb.Counts().TotalFailures; got != 1 {
+		t.Errorf("Counts().TotalFailures = %d, want 1 after a panic", got)
+	}
+	if cb.State() != StateOpen {
+		t.Errorf("State() = %v, want Open after a panicking request", cb.State())
+	}
+}
+
+func TestCircuitBreaker_FailedRequestLatencyNotRecorded(t *testing.T) {
+	s := defaultSettings()
+	s.Config.ThetaBase = 1.0
+	cb := NewCircuitBreaker(s)
+
+	cb.Execute(func() (interface{}, error) {
+		time.Sleep(5 * time.Millisecond)
+		return nil, nil
+	})
+	before := cb.Snapshot().St
+
+	for i := 0; i < 3; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
+
+	if after := cb.Snapshot().St; after != before {
+		t.Errorf("St changed from %v to %v; failed requests must not feed latency signals", before, after)
+	}
+}
+
+func TestCircuitBreaker_StaleResultIgnoredAfterTransition(t *testing.T) {
+	clock := newFakeClock()
+	s := defaultSettings()
+	cb := newCircuitBreakerWithClock(s, clock.Now)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cb.Execute(func() (interface{}, error) {
+			close(started)
+			<-release
+			return nil, errDownstream
+		})
+	}()
+	<-started
+
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	clock.Advance(s.Config.RecoveryTimeout)
+	cb.Execute(func() (interface{}, error) { return "ok", nil })
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed after a successful probe", cb.State())
+	}
+
+	close(release)
+	<-done
+
+	if cb.State() != StateClosed {
+		t.Errorf("State() = %v, want Closed; a stale failure must not trip the circuit", cb.State())
+	}
+	if _, n := cb.collector.WindowStats(); n != 0 {
+		t.Errorf("window count = %d, want 0; a stale outcome must be discarded", n)
+	}
+}

@@ -6,14 +6,14 @@ import "sync"
 
 // EWMA computes an exponentially weighted moving average of observed latencies.
 type EWMA struct {
-	alpha		float64
-	value		float64
-	initialized	bool
-	mu			sync.RWMutex
+	alpha       float64
+	value       float64
+	initialized bool
+	mu          sync.RWMutex
 }
 
 // NewEWMA returns a new EWMA engine using the given smoothing factor alpha.
-func NewEWMA(alpha float64) *EWMA{
+func NewEWMA(alpha float64) *EWMA {
 	return &EWMA{alpha: alpha}
 }
 
@@ -23,7 +23,7 @@ func (e *EWMA) Update(latency float64) float64 {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		e.value = latency 
+		e.value = latency
 		e.initialized = true
 		return e.value
 	}
@@ -33,14 +33,14 @@ func (e *EWMA) Update(latency float64) float64 {
 }
 
 // Value returns the current smoothed value without incorporating a new observation.
-func (e *EWMA) Value() float64{
+func (e *EWMA) Value() float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.value
 }
 
 // Reset clears the EWMA state, discarding all previous observations
-func (e *EWMA) Reset(){
+func (e *EWMA) Reset() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.value = 0

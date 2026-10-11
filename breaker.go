@@ -9,20 +9,26 @@ import (
 	"time"
 )
 
-// ErrOpenState is returned by Execute when the circuit breaker is open and
-// the request is rejected without being forwarded to the downstream
-var ErrOpenState = errors.New("circuit breaker is open")
+var (
+	// ErrOpenState is returned by Execute when the circuit breaker is open and
+	// the request is rejected without being forwarded to the downstream.
+	ErrOpenState = errors.New("circuit breaker is open")
 
-// Settings configures a CircuitBreaker instance
+	// ErrTooManyRequests is returned by Execute when the circuit breaker is
+	// half-open and Config.HalfOpenMaxRequests probes have already been admitted.
+	ErrTooManyRequests = errors.New("too many requests")
+)
+
+// Settings configures a CircuitBreaker instance.
 type Settings struct {
-	// Name identifies this circuit breaker instance in logs and callbacks
+	// Name identifies this circuit breaker instance in logs and callbacks.
 	Name string
 
-	// Config holds all tunable parameters. Use DefaultConfig() as a starting point
+	// Config holds all tunable parameters. Use DefaultConfig as a starting point.
 	Config Config
 
 	// OnStateChange is an optional callback invoked whenever the circuit transitions
-	// between states. It receives the breaker name, the previous state, and new state.
+	// between states. It receives the breaker name, the previous state, and the new state.
 	OnStateChange func(name string, from State, to State)
 }
 
@@ -36,24 +42,23 @@ type Counts struct {
 	ConsecutiveFailures  uint32
 }
 
-// Snapshot is a point-in-time read-only view of the circuit breaker's internal signal
+// Snapshot is a point-in-time read-only view of the circuit breaker's internal signals.
 type Snapshot struct {
 	State            State
-	St               float64 // current ewma latency
+	St               float64 // current EWMA latency
 	Pt               float64 // current rolling percentile
 	Dt               float64 // degradation ratio
 	ThetaT           float64 // current adaptive threshold
-	Sbase            float64 // healthy state ewma baseline
-	Pbase            float64 // healthy state percentile baseline
-	FailureRate      float64 // current failure rate in observation window
-	DegradedRequests int64   // request classified as slow
-	IsWarmingUp      bool    // true if baseline has not yet been captured
+	Sbase            float64 // healthy-state EWMA baseline
+	Pbase            float64 // healthy-state percentile baseline
+	FailureRate      float64 // current failure rate in the outcome window
+	DegradedRequests int64   // requests classified as slow
+	IsWarmingUp      bool    // true if no baseline has been set yet
 }
 
 // CircuitBreaker is the main entry point of fluxgo. It orchestrates all
 // internal components (EWMA, RollingPercentile, MetricCollector,
-// BaselineEstimator, AdaptiveThresholdCalculator, StateMachine) behind
-// an API compatible with gobreaker.
+// BaselineEstimator, AdaptiveThresholdCalculator, StateMachine).
 type CircuitBreaker struct {
 	name          string
 	cfg           Config
@@ -99,30 +104,37 @@ func newCircuitBreakerWithClock(s Settings, now func() time.Time) *CircuitBreake
 }
 
 // Execute runs the given request if the circuit breaker allows it.
-// It returns ErrOpenState if the circuit is open. The signature is
-// compatible with gobreaker.
+// It returns ErrOpenState if the circuit is open and ErrTooManyRequests if
+// the circuit is half-open and the probe limit has been reached. If req
+// panics, the request is recorded as a failure and the panic is re-raised.
 func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
-	allowed, toHalfOpen := cb.machine.AllowRequest()
-	if !allowed {
-		return nil, ErrOpenState
-	}
+	generation, toHalfOpen, err := cb.machine.AllowRequest()
 	if toHalfOpen {
 		cb.handleTransition(StateOpen, StateHalfOpen)
 	}
+	if err != nil {
+		return nil, err
+	}
 
 	start := time.Now()
-	result, err := req()
-	cb.onRequestComplete(time.Since(start), err == nil)
+	defer func() {
+		if r := recover(); r != nil {
+			cb.onRequestComplete(generation, time.Since(start), false)
+			panic(r)
+		}
+	}()
 
+	result, err := req()
+	cb.onRequestComplete(generation, time.Since(start), err == nil)
 	return result, err
 }
 
-// State returns the current state of the circuit breaker
+// State returns the current state of the circuit breaker.
 func (cb *CircuitBreaker) State() State {
 	return cb.machine.State()
 }
 
-// Counts returns a snapshot of the request counter
+// Counts returns a snapshot of the request counters.
 func (cb *CircuitBreaker) Counts() Counts {
 	total := cb.collector.TotalRequests()
 	failures := cb.collector.TotalFailures()
@@ -135,8 +147,10 @@ func (cb *CircuitBreaker) Counts() Counts {
 	}
 }
 
-// Snapshot returns a point-in-time view of the circuit breaker's internal
-// signals for observability purposes (NF4). It is safe to call concurrently.
+// Snapshot returns a view of the circuit breaker's internal signals for
+// observability purposes (NF4). It is safe to call concurrently. Each field
+// is read atomically, but fields are not read under a single lock and may
+// reflect slightly different instants under concurrent load.
 func (cb *CircuitBreaker) Snapshot() Snapshot {
 	St := cb.ewma.Value()
 	Pt := cb.selectPercentile(cb.rolling.Current())
@@ -161,27 +175,36 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 	}
 }
 
-// onRequestComplete runs the post-request decision pipeline: classify slow
-// requests, record metrics, feed the baseline estimator, and evaluate the
-// state machine against the current threshold.
-func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool) {
-	latencyMs := latency.Seconds() * 1000
+// onRequestComplete runs the post-request decision pipeline for a request
+// admitted in the given generation: classify slow requests, record latency
+// and outcome, feed the baseline estimator, and evaluate the state machine
+// against the current threshold. success reports whether req returned a nil
+// error; only latencies of such requests feed the latency signals.
+func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Duration, success bool) {
+	failed := !success
 
-	if !cb.estimator.IsWarmingUp() {
-		ptPrev := cb.selectPercentile(cb.rolling.Current())
-		if ptPrev > 0 && latencyMs > ptPrev*cb.cfg.SlowRequestMargin {
-			success = false
-			cb.collector.RecordDegraded()
+	var p95, p99 float64
+	if success {
+		if !cb.estimator.IsWarmingUp() {
+			ptPrev := cb.selectPercentile(cb.rolling.Current())
+			latencyMs := latency.Seconds() * 1000
+			if ptPrev > 0 && latencyMs > ptPrev*cb.cfg.SlowRequestMargin {
+				failed = true
+				cb.collector.RecordDegraded()
+			}
 		}
+		p95, p99 = cb.collector.RecordLatency(latency)
+	} else {
+		p95, p99 = cb.rolling.Current()
 	}
 
-	p95, p99 := cb.collector.Record(latency, success)
-	if success {
-		atomic.StoreInt64(&cb.consecutiveFailures, 0)
-		atomic.AddInt64(&cb.consecutiveSuccesses, 1)
-	} else {
+	cb.collector.RecordOutcome(generation, !failed)
+	if failed {
 		atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 		atomic.AddInt64(&cb.consecutiveFailures, 1)
+	} else {
+		atomic.StoreInt64(&cb.consecutiveFailures, 0)
+		atomic.AddInt64(&cb.consecutiveSuccesses, 1)
 	}
 
 	St := cb.ewma.Value()
@@ -198,24 +221,24 @@ func (cb *CircuitBreaker) onRequestComplete(latency time.Duration, success bool)
 
 	switch state {
 	case StateHalfOpen:
-		if success {
-			if cb.machine.OnHalfOpenSuccess() {
+		if !failed {
+			if cb.machine.OnHalfOpenSuccess(generation) {
 				cb.handleTransition(StateHalfOpen, StateClosed)
 			}
-		} else if cb.machine.OnHalfOpenFailure() {
+		} else if cb.machine.OnHalfOpenFailure(generation) {
 			cb.handleTransition(StateHalfOpen, StateOpen)
 		}
 	case StateClosed:
-		if n >= cb.cfg.MinRequests && cb.machine.EvaluateClosed(fr, thetaT) {
+		if n >= cb.cfg.MinRequests && cb.machine.EvaluateClosed(generation, fr, thetaT) {
 			cb.handleTransition(StateClosed, StateOpen)
 		}
 	}
 }
 
-// handleTransition resets the outcome window and consecutive counters after
-// a state transition, then fires the OnStateChange callback if one is set.
+// handleTransition moves the outcome window to the new generation, resets
+// the consecutive counters, and fires the OnStateChange callback if one is set.
 func (cb *CircuitBreaker) handleTransition(from, to State) {
-	cb.collector.ResetWindow()
+	cb.collector.AdvanceWindow(cb.machine.Generation())
 	atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 	atomic.StoreInt64(&cb.consecutiveFailures, 0)
 	if cb.onStateChange != nil {

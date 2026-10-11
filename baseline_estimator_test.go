@@ -71,3 +71,34 @@ func TestBaselineEstimator_NoValidCaptureWhenNotClosed(t *testing.T) {
 		t.Fatal("expected no valid capture while the circuit is not closed")
 	}
 }
+
+func TestBaselineEstimator_RejectsNonPositiveSignals(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
+
+	b.Observe(0, 0, 0, true)
+
+	if !b.NeedsCapture() || !b.IsWarmingUp() {
+		t.Fatal("expected zero signals to be rejected without setting a baseline")
+	}
+
+	b.Observe(20, 40, 0, true)
+	if sbase, pbase := b.Baseline(); sbase != 20 || pbase != 40 {
+		t.Fatalf("expected baseline (20, 40) after positive signals, got (%v, %v)", sbase, pbase)
+	}
+}
+
+func TestBaselineEstimator_WarmingUpUntilBaselineSet(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
+
+	b.Observe(20, 40, 0, true)
+	clock.Advance(2 * cfg.WarmupDuration)
+
+	if !b.IsWarmingUp() {
+		t.Fatal("expected warm-up to remain active until a baseline is set")
+	}
+}

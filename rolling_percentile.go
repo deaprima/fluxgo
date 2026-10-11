@@ -15,11 +15,11 @@ import (
 // RollingPercentile computes P95 and P99 latency percentiles over a sliding
 // window of the most recent N observations.
 type RollingPercentile struct {
-	window	[]float64
-	size	int 
-	count	int 
-	head	int 
-	mu		sync.RWMutex
+	window []float64
+	size   int
+	count  int
+	head   int
+	mu     sync.RWMutex
 }
 
 // NewRollingPercentile returns a new RollingPercentile engine with the
@@ -27,12 +27,12 @@ type RollingPercentile struct {
 func NewRollingPercentile(windowSize int) *RollingPercentile {
 	return &RollingPercentile{
 		window: make([]float64, windowSize),
-		size:	windowSize,
+		size:   windowSize,
 	}
 }
 
 // Update records a new latency observation and returns the current P95 and P99 computed from sliding window.
-func (r *RollingPercentile) Update(latency float64)(p95, p99 float64){
+func (r *RollingPercentile) Update(latency float64) (p95, p99 float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -66,7 +66,7 @@ func (r *RollingPercentile) Percentiles() (p95, p99 float64) {
 // Current returns the current P95 and P99 without recording a new observation
 // It is equivalent to percentiles and is provided as a convenience alias used by
 // the slow-request classifier and observability accessors
-func (r *RollingPercentile) Current() (p95, p99 float64){
+func (r *RollingPercentile) Current() (p95, p99 float64) {
 	return r.Percentiles()
 }
 

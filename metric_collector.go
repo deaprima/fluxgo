@@ -1,6 +1,6 @@
 // metric_collector.go implements MetricCollector, which records per-request
-// latency and success status, forwarding data to the EWMA, rolling
-// percentile, and outcome window engines.
+// latency and outcome, forwarding data to the EWMA, rolling percentile, and
+// outcome window engines.
 package fluxgo
 
 import (
@@ -9,38 +9,47 @@ import (
 )
 
 // MetricCollector aggregates per-request observations and forwards them to
-// the EWMA, rolling percentile, and outcome window engines. 
+// the EWMA, rolling percentile, and outcome window engines. Latency and
+// outcome are recorded separately so that only latencies of requests that
+// actually reached and were served by the downstream feed the latency
+// signals. Lifetime counters are updated atomically to minimize contention
+// under high concurrency.
 type MetricCollector struct {
-	totalRequests	int64
-	totalFailures	int64
-	degradedRequests	int64
+	totalRequests    int64
+	totalFailures    int64
+	degradedRequests int64
 
-	ewma	*EWMA
-	rolling	*RollingPercentile
+	ewma     *EWMA
+	rolling  *RollingPercentile
 	outcomes *OutcomeWindow
 }
 
-// NewMetricCollector return a MetricCollector wired to given engines.
+// NewMetricCollector returns a MetricCollector wired to the given engines.
 func NewMetricCollector(ewma *EWMA, rolling *RollingPercentile, outcomes *OutcomeWindow) *MetricCollector {
 	return &MetricCollector{
-		ewma: ewma,
-		rolling: rolling,
+		ewma:     ewma,
+		rolling:  rolling,
 		outcomes: outcomes,
 	}
 }
 
-// Record incorporates a single request observation. latency is forwarded to
-// both signal engines and the outcome is added to the outcome window.
-func  (m *MetricCollector) Record(latency time.Duration, success bool) (p95, p99 float64){
+// RecordLatency forwards a latency observation to both signal engines and
+// returns the updated P95 and P99 so callers avoid a second sort. It should
+// only be called for requests that completed without error.
+func (m *MetricCollector) RecordLatency(latency time.Duration) (p95, p99 float64) {
 	ms := latency.Seconds() * 1000
 	m.ewma.Update(ms)
-	p95, p99 = m.rolling.Update(ms)
-	m.outcomes.Add(!success)
+	return m.rolling.Update(ms)
+}
+
+// RecordOutcome adds a request outcome belonging to the given generation to
+// the outcome window and updates the lifetime counters.
+func (m *MetricCollector) RecordOutcome(generation uint64, success bool) {
+	m.outcomes.Add(generation, !success)
 	atomic.AddInt64(&m.totalRequests, 1)
 	if !success {
 		atomic.AddInt64(&m.totalFailures, 1)
 	}
-	return
 }
 
 // FailureRate returns the ratio of failed requests to all requests held in
@@ -56,10 +65,11 @@ func (m *MetricCollector) WindowStats() (failureRate float64, count int) {
 	return m.outcomes.Stats()
 }
 
-// ResetWindow discards all outcomes in the outcome window. Lifetime counters
-// and latency signals are preserved.
-func (m *MetricCollector) ResetWindow() {
-	m.outcomes.Reset()
+// AdvanceWindow moves the outcome window to the given generation, discarding
+// outcomes from earlier generations. Lifetime counters and latency signals
+// are preserved.
+func (m *MetricCollector) AdvanceWindow(generation uint64) {
+	m.outcomes.Advance(generation)
 }
 
 // TotalRequests returns the total number of requests recorded since the last reset.
