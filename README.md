@@ -129,18 +129,20 @@ dashboard tooling. All fields are read under their respective component locks.
 | Component | Time | Space |
 |---|---|---|
 | EWMA update | O(1) | O(1) |
-| Rolling Percentile update | O(n log n) | O(n) |
+| Rolling Percentile update | O(n) | O(n) (zero-allocation) |
+| Rolling Percentile read (`Percentiles`/`Current`) | O(1) | O(1) |
 | Threshold calculation | O(1) | O(1) |
-| `Execute()` total overhead | O(n log n) per call | O(n) |
+| `Execute()` total overhead | O(n) per call | O(n) |
 
 where `n = Config.WindowSize` (default 100).
 
 Benchmark on Intel Core i5-11300H @ 3.10GHz:
 
-| State | Latency/call | Allocations |
+| Benchmark / State | Latency/call | Allocations |
 |---|---|---|
-| Closed (full pipeline) | ~1,092 ns | 1 allocs / 895 B |
-| Open (fast reject) | ~128 ns | 0 allocs / 0 B |
+| `RollingPercentile.Update()` | ~65 ns | 0 allocs / 0 B |
+| `Execute()` Closed (full pipeline) | ~656 ns | 0 allocs / 0 B |
+| `Execute()` Open (fast reject) | ~57 ns | 0 allocs / 0 B |
 
 ## API Compatibility with gobreaker
 
