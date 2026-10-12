@@ -1,9 +1,9 @@
 // rolling_percentile.go implements a sliding-window rolling percentile engine
 // that computes P95 and P99 latency from the most recent N observations.
 //
-// Algorithm: circular buffer with sort-per-update.
-// Time complexity: O(n log n) per Update, where n is the window size.
-// Space complexity: O(n).
+// Algorithm: circular buffer with in-place binary insertion sort.
+// Time complexity: O(n) per Update (binary search O(log n) + memmove O(n)).
+// Space complexity: O(n) pre-allocated, zero-allocation at runtime.
 package fluxgo
 
 import (
@@ -15,19 +15,23 @@ import (
 // RollingPercentile computes P95 and P99 latency percentiles over a sliding
 // window of the most recent N observations.
 type RollingPercentile struct {
-	window []float64
-	size   int
-	count  int
-	head   int
-	mu     sync.RWMutex
+	window    []float64
+	sortedBuf []float64
+	size      int
+	count     int
+	head      int
+	p95       float64
+	p99       float64
+	mu        sync.RWMutex
 }
 
 // NewRollingPercentile returns a new RollingPercentile engine with the
 // given window size. windowSize is typically sourced from Config.WindowSize.
 func NewRollingPercentile(windowSize int) *RollingPercentile {
 	return &RollingPercentile{
-		window: make([]float64, windowSize),
-		size:   windowSize,
+		window:    make([]float64, windowSize),
+		sortedBuf: make([]float64, windowSize),
+		size:      windowSize,
 	}
 }
 
@@ -36,36 +40,51 @@ func (r *RollingPercentile) Update(latency float64) (p95, p99 float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.window[r.head] = latency
-	r.head = (r.head + 1) % r.size
-	if r.count < r.size {
-		r.count++
+	if r.size <= 0 {
+		return 0, 0
 	}
 
-	sorted := make([]float64, r.count)
-	copy(sorted, r.window[:r.count])
-	sort.Float64s(sorted)
+	if r.count < r.size {
+		idx := sort.Search(r.count, func(i int) bool {
+			return r.sortedBuf[i] >= latency
+		})
+		copy(r.sortedBuf[idx+1:r.count+1], r.sortedBuf[idx:r.count])
+		r.sortedBuf[idx] = latency
+		r.count++
+	} else {
+		oldVal := r.window[r.head]
+		oldIdx := sort.Search(r.size, func(i int) bool {
+			return r.sortedBuf[i] >= oldVal
+		})
+		if oldIdx < r.size {
+			copy(r.sortedBuf[oldIdx:r.size-1], r.sortedBuf[oldIdx+1:r.size])
+		}
 
-	return percentile(sorted, 95), percentile(sorted, 99)
+		newIdx := sort.Search(r.size-1, func(i int) bool {
+			return r.sortedBuf[i] >= latency
+		})
+		copy(r.sortedBuf[newIdx+1:r.size], r.sortedBuf[newIdx:r.size-1])
+		r.sortedBuf[newIdx] = latency
+	}
+
+	r.window[r.head] = latency
+	r.head = (r.head + 1) % r.size
+
+	r.p95 = percentile(r.sortedBuf[:r.count], 95)
+	r.p99 = percentile(r.sortedBuf[:r.count], 99)
+	return r.p95, r.p99
 }
 
-// Percentiles returns the current P95 and P99 without recording a new
-// observation.
+// Percentiles returns the current P95 and P99 without recording a new observation.
 func (r *RollingPercentile) Percentiles() (p95, p99 float64) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.count == 0 {
-		return 0, 0
-	}
-	sorted := make([]float64, r.count)
-	copy(sorted, r.window[:r.count])
-	sort.Float64s(sorted)
-	return percentile(sorted, 95), percentile(sorted, 99)
+	return r.p95, r.p99
 }
 
-// Current returns the current P95 and P99 without recording a new observation
-// It is equivalent to percentiles and is provided as a convenience alias used by
-// the slow-request classifier and observability accessors
+// Current returns the current P95 and P99 without recording a new observation.
+// It is equivalent to Percentiles and is provided as a convenience alias used by
+// the slow-request classifier and observability accessors.
 func (r *RollingPercentile) Current() (p95, p99 float64) {
 	return r.Percentiles()
 }
@@ -76,6 +95,8 @@ func (r *RollingPercentile) Reset() {
 	defer r.mu.Unlock()
 	r.head = 0
 	r.count = 0
+	r.p95 = 0
+	r.p99 = 0
 }
 
 // percentile returns the value at percentile p in a sorted slice using the
