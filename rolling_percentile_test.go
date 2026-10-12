@@ -111,3 +111,12 @@ func TestRollingPercentileCurrent_EmptyReturnsZero(t *testing.T) {
 		t.Errorf("expected (0, 0) for empty window, got (%v, %v)", p95, p99)
 	}
 }
+
+func BenchmarkRollingPercentile_Update(b *testing.B) {
+	rp := NewRollingPercentile(100)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rp.Update(float64(i % 500))
+	}
+}
