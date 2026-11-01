@@ -52,10 +52,10 @@ func TestEWMAConcurrentUpdate(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func() {
+		go func(v float64) {
 			defer wg.Done()
-			e.Update(float64(i))
-		}()
+			e.Update(v)
+		}(float64(i))
 	}
 	wg.Wait()
 	// no race condition — just verify it doesn't panic or deadlock

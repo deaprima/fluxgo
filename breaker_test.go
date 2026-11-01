@@ -158,30 +158,50 @@ func TestCircuitBreaker_HalfOpenProbe_Failure_TransitionsToOpen(t *testing.T) {
 	}
 }
 
-func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
+// executeWithLatency runs one request through the same admission and
+// post-request pipeline as Execute, but with a synthetic latency so that
+// latency-sensitive tests do not depend on time.Sleep precision, which varies
+// across operating systems and Go versions.
+func executeWithLatency(cb *CircuitBreaker, latency time.Duration, success bool) error {
+	generation, toHalfOpen, err := cb.machine.AllowRequest()
+	if toHalfOpen {
+		cb.handleTransition(StateOpen, StateHalfOpen)
+	}
+	if err != nil {
+		return err
+	}
+	cb.onRequestComplete(generation, latency, success)
+	return nil
+}
+
+// newWarmedUpBreaker returns a breaker whose rolling window is filled with
+// 10ms requests and whose warm-up has completed with a captured baseline.
+func newWarmedUpBreaker(t *testing.T, margin float64) *CircuitBreaker {
+	t.Helper()
+	clock := newFakeClock()
 	cfg := DefaultConfig()
 	cfg.WarmupDuration = 50 * time.Millisecond
-	cfg.SlowRequestMargin = 2.0
-	cb := NewCircuitBreaker(Settings{Name: "test-slow", Config: cfg})
+	cfg.SlowRequestMargin = margin
+	cb := newCircuitBreakerWithClock(Settings{Name: "test-slow", Config: cfg}, clock.Now)
 
-	// Fill rolling window with 10ms baseline requests to establish Pt.
 	for i := 0; i < 110; i++ {
-		cb.Execute(func() (interface{}, error) {
-			time.Sleep(10 * time.Millisecond)
-			return nil, nil
-		})
+		executeWithLatency(cb, 10*time.Millisecond, true)
 	}
+	clock.Advance(cfg.WarmupDuration)
+	executeWithLatency(cb, 10*time.Millisecond, true)
 
-	// Wait for warm-up to finish.
-	time.Sleep(60 * time.Millisecond)
+	if cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected warm-up to be complete")
+	}
+	return cb
+}
 
+func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
+	cb := newWarmedUpBreaker(t, 2.0)
 	degradedBefore := cb.collector.DegradedRequests()
 
-	// Send a slow request: 10ms * 2.0 margin = 20ms threshold; 30ms > 20ms → degraded.
-	cb.Execute(func() (interface{}, error) {
-		time.Sleep(30 * time.Millisecond)
-		return nil, nil
-	})
+	// 10ms * 2.0 margin = 20ms threshold; 30ms > 20ms → degraded.
+	executeWithLatency(cb, 30*time.Millisecond, true)
 
 	degradedAfter := cb.collector.DegradedRequests()
 	if degradedAfter <= degradedBefore {
@@ -194,43 +214,29 @@ func TestCircuitBreaker_SlowRequest_InactiveDuringWarmup(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.WarmupDuration = 10 * time.Second
 	cfg.SlowRequestMargin = 2.0
-	cb := NewCircuitBreaker(Settings{Name: "test-warmup", Config: cfg})
+	cb := newCircuitBreakerWithClock(Settings{Name: "test-warmup", Config: cfg}, newFakeClock().Now)
 
-	cb.Execute(func() (interface{}, error) {
-		time.Sleep(500 * time.Millisecond)
-		return nil, nil
-	})
+	// Establish a valid Pt so that only the warm-up rule can suppress
+	// classification.
+	for i := 0; i < 110; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, true)
+	}
+	executeWithLatency(cb, 500*time.Millisecond, true)
 
+	if !cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected warm-up to still be active")
+	}
 	if got := cb.collector.DegradedRequests(); got != 0 {
 		t.Errorf("expected DegradedRequests = 0 during warmup, got %d", got)
 	}
 }
 
 func TestCircuitBreaker_NormalRequest_NotClassifiedAsDegraded(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.WarmupDuration = 50 * time.Millisecond
-	cfg.SlowRequestMargin = 3.0
-	cb := NewCircuitBreaker(Settings{Name: "test-normal", Config: cfg})
-
-	// Establish baseline.
-	for i := 0; i < 110; i++ {
-		cb.Execute(func() (interface{}, error) {
-			time.Sleep(10 * time.Millisecond)
-			return nil, nil
-		})
-	}
-	time.Sleep(60 * time.Millisecond)
-
+	cb := newWarmedUpBreaker(t, 2.0)
 	degradedBefore := cb.collector.DegradedRequests()
 
-	// Request well within the 3x margin (10ms baseline, 15ms < 30ms threshold →
-	// normal). The wide margin keeps this deterministic under -race, where
-	// scheduling overhead can otherwise push a single probe's latency past a
-	// tight threshold even though the request isn't actually slow.
-	cb.Execute(func() (interface{}, error) {
-		time.Sleep(15 * time.Millisecond)
-		return nil, nil
-	})
+	// 10ms * 2.0 margin = 20ms threshold; 15ms < 20ms → normal.
+	executeWithLatency(cb, 15*time.Millisecond, true)
 
 	if got := cb.collector.DegradedRequests(); got != degradedBefore {
 		t.Errorf("expected DegradedRequests unchanged for normal request, got %d", got)
