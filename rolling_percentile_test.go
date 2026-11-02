@@ -112,6 +112,28 @@ func TestRollingPercentileCurrent_EmptyReturnsZero(t *testing.T) {
 	}
 }
 
+func TestRollingPercentileCount_CapsAtWindowSizeAndResets(t *testing.T) {
+	rp := NewRollingPercentile(5)
+	for i := 1; i <= 3; i++ {
+		rp.Update(float64(i))
+	}
+	if got := rp.Count(); got != 3 {
+		t.Errorf("Count() = %d after 3 updates, want 3", got)
+	}
+
+	for i := 0; i < 10; i++ {
+		rp.Update(1)
+	}
+	if got := rp.Count(); got != 5 {
+		t.Errorf("Count() = %d after overflowing the window, want 5", got)
+	}
+
+	rp.Reset()
+	if got := rp.Count(); got != 0 {
+		t.Errorf("Count() = %d after Reset, want 0", got)
+	}
+}
+
 func BenchmarkRollingPercentile_Update(b *testing.B) {
 	rp := NewRollingPercentile(100)
 	b.ResetTimer()

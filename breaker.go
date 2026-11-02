@@ -213,7 +213,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 	state := cb.machine.State()
 
 	if cb.estimator.NeedsCapture() {
-		cb.estimator.Observe(St, Pt, fr, state == StateClosed)
+		cb.estimator.Observe(St, Pt, fr, n, cb.rolling.Count(), state == StateClosed)
 	}
 
 	Sbase, Pbase := cb.estimator.Baseline()

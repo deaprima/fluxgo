@@ -89,6 +89,13 @@ func (r *RollingPercentile) Current() (p95, p99 float64) {
 	return r.Percentiles()
 }
 
+// Count return the number of observations currently held in the window
+func (r *RollingPercentile) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.count
+}
+
 // Reset clears all observations from the sliding window.
 func (r *RollingPercentile) Reset() {
 	r.mu.Lock()

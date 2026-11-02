@@ -73,10 +73,17 @@ the failure rate compared to a static threshold. When latency improves
 
 ## Warmup Period
 
-On startup, fluxgo observes the system for `WarmupDuration` (default 30s)
-before activating the adaptive threshold. During warmup, the circuit behaves
-identically to a static gobreaker threshold, preventing false trips on
-cold-start traffic.
+Warm-up starts at the first request (not at construction) and lasts at least
+`WarmupDuration` (default 30s). It also continues until the rolling percentile
+window holds `WindowSize` latency samples, so the baseline is never taken from
+a handful of requests; under low traffic, warm-up can therefore last longer
+than `WarmupDuration`. During warm-up, the circuit trips on the static
+`ThetaBase` threshold, preventing false trips on cold-start traffic.
+
+A baseline is captured as valid only when the circuit is Closed, the outcome
+window holds at least `MinRequests` outcomes, and the failure rate is below
+`WarmupMaxFailRate`. Otherwise the current signals are kept as a temporary
+fallback baseline, and fluxgo keeps trying to capture a valid one.
 
 ## Anti-Flapping
 
