@@ -309,7 +309,7 @@ func TestCircuitBreaker_IdleBeforeTraffic_CapturesBaseline(t *testing.T) {
 	}
 
 	clock.Advance(10 * time.Minute)
-	for i := 0; i < 50; i++ {
+	for i := 0; i < cfg.WindowSize; i++ {
 		cb.Execute(ok)
 	}
 	if !cb.Snapshot().IsWarmingUp {
@@ -325,6 +325,45 @@ func TestCircuitBreaker_IdleBeforeTraffic_CapturesBaseline(t *testing.T) {
 	}
 	if snap.Sbase <= 0 || snap.Pbase <= 0 {
 		t.Fatalf("expected baseline to be captured, got Sbase=%v Pbase=%v", snap.Sbase, snap.Pbase)
+	}
+}
+
+func TestCircuitBreaker_BaselineNotCapturedFromTinySample(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cb := newCircuitBreakerWithClock(Settings{Name: "test", Config: cfg}, clock.Now)
+
+	// Two requests spanning the warm-up period, the second one a latency
+	// spike, must not become the baseline.
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	clock.Advance(cfg.WarmupDuration + time.Second)
+	executeWithLatency(cb, 500*time.Millisecond, true)
+
+	snap := cb.Snapshot()
+	if !snap.IsWarmingUp {
+		t.Fatalf("expected warm-up to continue, got Sbase=%v Pbase=%v", snap.Sbase, snap.Pbase)
+	}
+}
+
+func TestCircuitBreaker_WarmupExtendsUntilRollingWindowIsFull(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cb := newCircuitBreakerWithClock(Settings{Name: "test", Config: cfg}, clock.Now)
+
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	clock.Advance(cfg.WarmupDuration)
+	for i := 1; i < cfg.WindowSize-1; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, true)
+	}
+	if !cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected warm-up to continue while the rolling window is not full")
+	}
+
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	snap := cb.Snapshot()
+	if snap.IsWarmingUp || snap.Pbase != 10 {
+		t.Fatalf("expected a valid baseline once the window is full, got IsWarmingUp=%v Pbase=%v",
+			snap.IsWarmingUp, snap.Pbase)
 	}
 }
 

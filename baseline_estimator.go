@@ -15,7 +15,9 @@ import (
 // construction, so a circuit breaker that stays idle after startup still
 // performs a full warm-up once traffic arrives. The estimator moves through
 // three phases:
-//  1. Warm-up: no baseline is set; IsWarmingUp returns true.
+//  1. Warm-up: no baseline is set; IsWarmingUp returns true. Warm-up lasts
+//     at least WarmupDuration and continues until the rolling percentile
+//     window is full, so a baseline is never taken from a handful of requests.
 //  2. Fallback: warm-up ended while conditions were unhealthy; the current
 //     signals are stored as a best-effort baseline and Observe keeps
 //     trying to replace it with a valid capture.
@@ -63,12 +65,18 @@ func (b *BaselineEstimator) NeedsCapture() bool {
 	return !b.validCapture
 }
 
-// Observe feeds the current signals to the estimator. The first call starts
-// the warm-up clock. Once WarmupDuration has elapsed and both signals are
-// positive, the signals are captured as a valid baseline if the circuit is
-// closed and failureRate is below WarmupMaxFailRate; otherwise they are
-// stored once as a fallback and later calls keep attempting a valid capture.
-func (b *BaselineEstimator) Observe(St, Pt, failureRate float64, closed bool) {
+// Observe feeds the current signals to the estimator. outcomes is the number
+// of outcomes held in the outcome window and samples is the number of
+// latencies held in the rolling percentile window. The first call starts the
+// warm-up clock.
+//
+// Nothing is stored until WarmupDuration has elapsed, both signals are
+// positive, and the rolling window is full (samples >= WindowSize). The
+// signals are then captured as a valid baseline if the circuit is closed, at
+// least MinRequests outcomes are in the window, and failureRate is below
+// WarmupMaxFailRate; otherwise they are stored once as a fallback and later
+// calls keep attempting a valid capture.
+func (b *BaselineEstimator) Observe(St, Pt, failureRate float64, outcomes, samples int, closed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.validCapture {
@@ -81,10 +89,10 @@ func (b *BaselineEstimator) Observe(St, Pt, failureRate float64, closed bool) {
 	if b.now().Sub(b.startTime) < b.cfg.WarmupDuration {
 		return
 	}
-	if St <= 0 || Pt <= 0 {
+	if St <= 0 || Pt <= 0 || samples < b.cfg.WindowSize {
 		return
 	}
-	if closed && failureRate < b.cfg.WarmupMaxFailRate {
+	if closed && outcomes >= b.cfg.MinRequests && failureRate < b.cfg.WarmupMaxFailRate {
 		b.sbase, b.pbase = St, Pt
 		b.validCapture = true
 		b.fallback = false
