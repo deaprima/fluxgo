@@ -56,6 +56,7 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `MinRequests` | `20` | Minimum volume in outcome window before evaluating failure rate |
 | `HalfOpenMaxRequests` | `1` | Max concurrent probe requests admitted while Half-Open |
 | `SlowRequestMargin` | `2.0` | Multiplier on Pt; requests with latency > Pt × margin are classified as degraded. Locked at 2.0. |
+| `SlowRequestReference` | `SlowRefRecent` | Reference for slow request classification: `SlowRefRecent` (current Pt) or `SlowRefBaseline` (healthy Pbase once a valid baseline is captured). See [Slow Request Classification](#slow-request-classification). |
 | `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
 
 ## Adaptive Threshold Formula
@@ -127,6 +128,22 @@ latency > P95 × 2.0  →  treated as failure internally
 - The percentile snapshot is taken **before** the current latency enters the window (no self-comparison)
 - The result and error values returned by `Execute()` to the caller are **not affected** — gobreaker API compatibility is preserved
 - Degraded requests are observable via `Snapshot().DegradedRequests`
+
+**Reference (`SlowRequestReference`):**
+
+| Mode | Reference | Behavior |
+|---|---|---|
+| `SlowRefRecent` (default) | `Pt × SlowRequestMargin` | Tolerant of traffic spikes, but the reference rises with the latency, so a degradation without errors never trips the circuit |
+| `SlowRefBaseline` | `Pbase × SlowRequestMargin` | Detects gradual degradation; sustained spikes above the margin are also classified as slow |
+
+`SlowRefBaseline` uses the baseline only once a valid one has been captured;
+during warm-up and while only a fallback baseline exists, it behaves like
+`SlowRefRecent`.
+
+> **Note:** fluxgo needs a failure signal (an error or a slow request) to trip.
+> Rising latency on its own only lowers the threshold `theta_t`; with
+> `SlowRefRecent`, a downstream that becomes slower without returning errors
+> keeps the circuit closed.
 
 ## Observability
 

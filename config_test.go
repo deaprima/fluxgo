@@ -187,3 +187,19 @@ func TestValidateRejectsNaN(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultConfig_SlowRequestReference(t *testing.T) {
+	if got := DefaultConfig().SlowRequestReference; got != SlowRefRecent {
+		t.Errorf("DefaultConfig().SlowRequestReference = %v, want SlowRefRecent", got)
+	}
+}
+
+func TestValidateRejectsUnknownSlowRequestReference(t *testing.T) {
+	for _, ref := range []SlowRequestReference{-1, SlowRefBaseline + 1} {
+		cfg := DefaultConfig()
+		cfg.SlowRequestReference = ref
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected error for SlowRequestReference = %d, got nil", ref)
+		}
+	}
+}

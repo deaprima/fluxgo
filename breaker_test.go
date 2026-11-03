@@ -178,10 +178,16 @@ func executeWithLatency(cb *CircuitBreaker, latency time.Duration, success bool)
 // 10ms requests and whose warm-up has completed with a captured baseline.
 func newWarmedUpBreaker(t *testing.T, margin float64) *CircuitBreaker {
 	t.Helper()
-	clock := newFakeClock()
 	cfg := DefaultConfig()
-	cfg.WarmupDuration = 50 * time.Millisecond
 	cfg.SlowRequestMargin = margin
+	return newWarmedUpBreakerWithConfig(t, cfg)
+}
+
+func newWarmedUpBreakerWithConfig(t *testing.T, cfg Config) *CircuitBreaker {
+	t.Helper()
+	clock := newFakeClock()
+	cfg.WarmupDuration = 50 * time.Millisecond
+
 	cb := newCircuitBreakerWithClock(Settings{Name: "test-slow", Config: cfg}, clock.Now)
 
 	for i := 0; i < 110; i++ {
@@ -676,5 +682,98 @@ func TestCircuitBreaker_StaleLatencyIgnoredAfterRecovery(t *testing.T) {
 
 	if st := cb.Snapshot().St; st != 0 {
 		t.Errorf("St = %v, want 0; a stale latency must not feed the reset signals", st)
+	}
+}
+
+func rampLatency(cb *CircuitBreaker) time.Duration {
+	for ms := 10.0; ms <= 1480; ms *= 1.02 {
+		latency := time.Duration(ms * float64(time.Millisecond))
+		executeWithLatency(cb, latency, true)
+		if cb.State() == StateOpen {
+			return latency
+		}
+	}
+	return 0
+}
+
+func TestCircuitBreaker_SlowRefRecent_MissesGradualDegradation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cb := newWarmedUpBreakerWithConfig(t, cfg)
+
+	if latency := rampLatency(cb); latency != 0 {
+		t.Fatalf("expected SlowRefRecent to stay closed on a gradual ramp, opened at %v", latency)
+	}
+	if got := cb.collector.DegradedRequests(); got != 0 {
+		t.Errorf("expected no slow requests, got %d", got)
+	}
+}
+
+func TestCircuitBreaker_SlowRefBaseline_DetectsGradualDegradation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cfg.SlowRequestReference = SlowRefBaseline
+	cb := newWarmedUpBreakerWithConfig(t, cfg)
+
+	latency := rampLatency(cb)
+	if latency == 0 {
+		t.Fatal("expected SlowRefBaseline to open the circuit on a gradual ramp")
+	}
+	t.Logf("opened at %v (%.1fx the 10ms baseline)", latency, latency.Seconds()*1000/10)
+	if latency > 50*time.Millisecond {
+		t.Errorf("expected the circuit to open below 5x the baseline, opened at %v", latency)
+	}
+}
+
+func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cfg.SlowRequestReference = SlowRefBaseline
+	cb := newWarmedUpBreakerWithConfig(t, cfg)
+
+	// A 2.5x spike shorter than MinRequests requests, then back to normal.
+	for i := 0; i < cfg.MinRequests-1; i++ {
+		executeWithLatency(cb, 25*time.Millisecond, true)
+	}
+	for i := 0; i < cfg.WindowSize; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, true)
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("expected a short spike not to trip the circuit, got %v", cb.State())
+	}
+	if got := cb.collector.DegradedRequests(); got != int64(cfg.MinRequests-1) {
+		t.Errorf("expected every spike request to be classified as slow, got %d", got)
+	}
+}
+
+func TestCircuitBreaker_SlowRefBaseline_UsesRecentWithoutValidBaseline(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cfg.SlowRequestReference = SlowRefBaseline
+	cb := newCircuitBreakerWithClock(Settings{Name: "test", Config: cfg}, clock.Now)
+
+	// Warm up at 100ms with 10% errors, so only a fallback baseline is set.
+	executeWithLatency(cb, 100*time.Millisecond, true)
+	clock.Advance(cfg.WarmupDuration)
+	for i := 1; i < 120; i++ {
+		executeWithLatency(cb, 100*time.Millisecond, i%10 != 0)
+	}
+	if cb.Snapshot().IsWarmingUp || !cb.estimator.NeedsCapture() {
+		t.Fatal("expected a fallback baseline")
+	}
+
+	// Latency drops to 10ms while errors persist, so no valid capture occurs.
+	for i := 0; i < 120; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, i%10 != 0)
+	}
+	before := cb.collector.DegradedRequests()
+
+	// 50ms is below the fallback Pbase × margin (200ms) but above the recent
+	// Pt × margin (20ms).
+	executeWithLatency(cb, 50*time.Millisecond, true)
+
+	if got := cb.collector.DegradedRequests(); got != before+1 {
+		t.Errorf("expected classification against the recent percentile, got %d new slow requests", got-before)
 	}
 }
