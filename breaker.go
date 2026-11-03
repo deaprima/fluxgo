@@ -166,7 +166,7 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 		St:               St,
 		Pt:               Pt,
 		Dt:               Dt,
-		ThetaT:           cb.calculator.Calculate(St, Pt, Sbase, Pbase),
+		ThetaT:           cb.threshold(St, Pt, Sbase, Pbase),
 		Sbase:            Sbase,
 		Pbase:            Pbase,
 		FailureRate:      cb.collector.FailureRate(),
@@ -179,13 +179,14 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 // admitted in the given generation: classify slow requests, record latency
 // and outcome, feed the baseline estimator, and evaluate the state machine
 // against the current threshold. success reports whether req returned a nil
-// error; only latencies of such requests feed the latency signals.
+// error; only latencies of such requests feed the latency signals, and only
+// if they were admitted in the current generation.
 func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Duration, success bool) {
 	failed := !success
 
 	var p95, p99 float64
-	if success {
-		if !cb.estimator.IsWarmingUp() {
+	if success && generation == cb.machine.Generation() {
+		if !cb.estimator.IsWarmingUp() && cb.signalsReady() {
 			ptPrev := cb.selectPercentile(cb.rolling.Current())
 			latencyMs := latency.Seconds() * 1000
 			if ptPrev > 0 && latencyMs > ptPrev*cb.cfg.SlowRequestMargin {
@@ -217,7 +218,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 	}
 
 	Sbase, Pbase := cb.estimator.Baseline()
-	thetaT := cb.calculator.Calculate(St, Pt, Sbase, Pbase)
+	thetaT := cb.threshold(St, Pt, Sbase, Pbase)
 
 	switch state {
 	case StateHalfOpen:
@@ -237,13 +238,36 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 
 // handleTransition moves the outcome window to the new generation, resets
 // the consecutive counters, and fires the OnStateChange callback if one is set.
+// On recovery from HalfOpen to Closed it also resets the latency signals, which
+// still describe the degradation that tripped the circuit, so the recovered
+// downstream is judged on fresh latencies. The baseline is kept.
 func (cb *CircuitBreaker) handleTransition(from, to State) {
 	cb.collector.AdvanceWindow(cb.machine.Generation())
+	if from == StateHalfOpen && to == StateClosed {
+		cb.ewma.Reset()
+		cb.rolling.Reset()
+	}
 	atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 	atomic.StoreInt64(&cb.consecutiveFailures, 0)
 	if cb.onStateChange != nil {
 		cb.onStateChange(cb.name, from, to)
 	}
+}
+
+// signalsReady reports whether the rolling window holds at least MinRequests
+// latencies, enough for the latency signals to be compared with the baseline.
+// It is false while the signals refill after being reset on recovery.
+func (cb *CircuitBreaker) signalsReady() bool {
+	return cb.rolling.Count() >= cb.cfg.MinRequests
+}
+
+// threshold returns the adaptive threshold for the given signals, or
+// ThetaBase while the signals are not ready.
+func (cb *CircuitBreaker) threshold(St, Pt, Sbase, Pbase float64) float64 {
+	if !cb.signalsReady() {
+		return cb.cfg.ThetaBase
+	}
+	return cb.calculator.Calculate(St, Pt, Sbase, Pbase)
 }
 
 // selectPercentile returns p99 when PercentileTarget is 99 and p95 otherwise.
