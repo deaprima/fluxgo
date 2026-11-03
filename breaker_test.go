@@ -570,3 +570,111 @@ func TestCircuitBreaker_StaleResultIgnoredAfterTransition(t *testing.T) {
 		t.Errorf("window count = %d, want 0; a stale outcome must be discarded", n)
 	}
 }
+
+func newRecoveredBreaker(t *testing.T) *CircuitBreaker {
+	t.Helper()
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cb := newCircuitBreakerWithClock(Settings{Name: "test-recovery", Config: cfg}, clock.Now)
+
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	clock.Advance(cfg.WarmupDuration)
+	for i := 0; i < cfg.WindowSize; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, true)
+	}
+	if cb.Snapshot().IsWarmingUp {
+		t.Fatal("expected a captured baseline")
+	}
+
+	for i := 0; cb.State() == StateClosed; i++ {
+		if i == 1000 {
+			t.Fatal("expected the degradation to trip the circuit")
+		}
+		executeWithLatency(cb, 100*time.Millisecond, i%10 >= 3)
+	}
+
+	clock.Advance(cfg.RecoveryTimeout)
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	if cb.State() != StateClosed {
+		t.Fatalf("expected Closed after a successful probe, got %v", cb.State())
+	}
+	clock.Advance(cfg.MinDwellTime)
+	return cb
+}
+
+func TestCircuitBreaker_Recovery_ResetsSignalsAndKeepsBaseline(t *testing.T) {
+	cb := newRecoveredBreaker(t)
+
+	snap := cb.Snapshot()
+	if snap.St != 0 || snap.Pt != 0 {
+		t.Errorf("expected latency signals to be reset, got St=%v Pt=%v", snap.St, snap.Pt)
+	}
+	if snap.Sbase != 10 || snap.Pbase != 10 {
+		t.Errorf("expected the baseline to be kept, got Sbase=%v Pbase=%v", snap.Sbase, snap.Pbase)
+	}
+	if snap.ThetaT != cb.cfg.ThetaBase {
+		t.Errorf("expected ThetaT = ThetaBase while signals refill, got %v", snap.ThetaT)
+	}
+}
+
+func TestCircuitBreaker_Recovery_NoFalseRetrip(t *testing.T) {
+	cb := newRecoveredBreaker(t)
+
+	// The downstream is back at its baseline latency, with an error rate
+	// well below ThetaBase.
+	for i := 0; i < 300; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, i%10 != 0)
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("expected the recovered circuit to stay closed, got %v", cb.State())
+	}
+}
+
+func TestCircuitBreaker_Recovery_RetripsWhenStillFailing(t *testing.T) {
+	cb := newRecoveredBreaker(t)
+
+	for i := 0; i < 300 && cb.State() == StateClosed; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, i%10 >= 7)
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected the circuit to trip again on a 70% error rate")
+	}
+}
+
+func TestCircuitBreaker_Recovery_SlowRequestInactiveWhileSignalsRefill(t *testing.T) {
+	cb := newRecoveredBreaker(t)
+	before := cb.collector.DegradedRequests()
+
+	// 30ms is above 10ms * 2.0 margin, but only one latency has been seen
+	// since the reset.
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	executeWithLatency(cb, 30*time.Millisecond, true)
+
+	if got := cb.collector.DegradedRequests(); got != before {
+		t.Errorf("expected no slow request classification while signals refill, got %d new", got-before)
+	}
+}
+
+func TestCircuitBreaker_StaleLatencyIgnoredAfterRecovery(t *testing.T) {
+	clock := newFakeClock()
+	s := defaultSettings()
+	cb := newCircuitBreakerWithClock(s, clock.Now)
+
+	// A request admitted before the trip that is still in flight.
+	staleGeneration, _, _ := cb.machine.AllowRequest()
+
+	executeWithLatency(cb, 10*time.Millisecond, false)
+	clock.Advance(s.Config.RecoveryTimeout)
+	executeWithLatency(cb, 10*time.Millisecond, true)
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed after a successful probe", cb.State())
+	}
+
+	cb.onRequestComplete(staleGeneration, 2*time.Second, true)
+
+	if st := cb.Snapshot().St; st != 0 {
+		t.Errorf("St = %v, want 0; a stale latency must not feed the reset signals", st)
+	}
+}

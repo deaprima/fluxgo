@@ -96,6 +96,21 @@ failure rate hovers near the adaptive threshold.
 > original circuit breaker design. It is documented as a justified deviation
 > because it prevents instability at the cost of slightly delaying re-trip.
 
+## Recovery Behavior
+
+When a probe succeeds and the circuit moves from Half-Open to Closed, the EWMA
+and rolling percentile are reset, because they still describe the degradation
+that tripped the circuit. The healthy baseline (`Sbase`, `Pbase`) is kept.
+
+Until the rolling window holds `MinRequests` new latency samples, the circuit
+trips on the static `ThetaBase` threshold and slow request classification is
+inactive. After that, the adaptive threshold resumes with signals that reflect
+the downstream's current behavior. This prevents a recovered service from being
+tripped again by stale latency data.
+
+Latencies of requests admitted before the latest state transition are ignored,
+just like their outcomes.
+
 ## Slow Request Classification
 
 Beyond explicit errors, fluxgo classifies a request as **degraded** if its
@@ -108,7 +123,7 @@ latency > P95 × 2.0  →  treated as failure internally
 ```
 
 **Rules:**
-- Classification is inactive during warmup or when the rolling window is not yet populated
+- Classification is inactive during warmup and while the rolling window holds fewer than `MinRequests` latencies (for example, right after recovery)
 - The percentile snapshot is taken **before** the current latency enters the window (no self-comparison)
 - The result and error values returned by `Execute()` to the caller are **not affected** — gobreaker API compatibility is preserved
 - Degraded requests are observable via `Snapshot().DegradedRequests`
