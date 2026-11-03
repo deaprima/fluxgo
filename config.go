@@ -11,6 +11,25 @@ import (
 // absorbing floating-point rounding in user-supplied weights.
 const weightSumTolerance = 1e-9
 
+// SlowRequestReference selects the latency that a successful request is
+// compared with when it is classified as slow.
+type SlowRequestReference int
+
+const (
+	// SlowRefRecent compares a request with the current rolling percentile
+	// (Pt × SlowRequestMargin). It detects sudden latency spikes relative to
+	// recent traffic, but follows a gradual degradation without flagging it.
+	// This is the default.
+	SlowRefRecent SlowRequestReference = iota
+
+	// SlowRefBaseline compares a request with the healthy-state percentile
+	// baseline (Pbase × SlowRequestMargin) once a valid baseline has been
+	// captured, and behaves like SlowRefRecent until then. It also detects
+	// gradual degradation, at the cost of classifying sustained traffic
+	// spikes above the margin as slow.
+	SlowRefBaseline
+)
+
 // Config holds all tunable parameters for a CircuitBreaker instance.
 // Use DefaultConfig to obtain a valid starting point.
 type Config struct {
@@ -73,6 +92,11 @@ type Config struct {
 	// Must be greater than zero. Default: 2.0.
 	SlowRequestMargin float64
 
+	// SlowRequestReference selects whether slow requests are classified
+	// against the recent rolling percentile or the healthy baseline.
+	// Default: SlowRefRecent.
+	SlowRequestReference SlowRequestReference
+
 	// RandomSeed is an optional seed for reproducible testbed runs.
 	// It is not used by the core library.
 	RandomSeed int64
@@ -82,22 +106,23 @@ type Config struct {
 // preliminary tuning. All values may be adjusted via the Config fields.
 func DefaultConfig() Config {
 	return Config{
-		Alpha:               0.3,
-		WindowSize:          100,
-		PercentileTarget:    95,
-		W1:                  0.4,
-		W2:                  0.6,
-		ThetaBase:           0.6,
-		ThetaMin:            0.05,
-		ThetaMax:            0.9,
-		WarmupDuration:      30 * time.Second,
-		WarmupMaxFailRate:   0.05,
-		RecoveryTimeout:     60 * time.Second,
-		MinDwellTime:        5 * time.Second,
-		MinRequests:         20,
-		HalfOpenMaxRequests: 1,
-		SlowRequestMargin:   2.0,
-		RandomSeed:          0,
+		Alpha:                0.3,
+		WindowSize:           100,
+		PercentileTarget:     95,
+		W1:                   0.4,
+		W2:                   0.6,
+		ThetaBase:            0.6,
+		ThetaMin:             0.05,
+		ThetaMax:             0.9,
+		WarmupDuration:       30 * time.Second,
+		WarmupMaxFailRate:    0.05,
+		RecoveryTimeout:      60 * time.Second,
+		MinDwellTime:         5 * time.Second,
+		MinRequests:          20,
+		HalfOpenMaxRequests:  1,
+		SlowRequestMargin:    2.0,
+		SlowRequestReference: SlowRefRecent,
+		RandomSeed:           0,
 	}
 }
 
@@ -147,6 +172,9 @@ func (c Config) Validate() error {
 	}
 	if !(c.SlowRequestMargin > 0) {
 		return errors.New("slow request margin must be greater than zero")
+	}
+	if c.SlowRequestReference != SlowRefRecent && c.SlowRequestReference != SlowRefBaseline {
+		return errors.New("slow request reference must be SlowRefRecent or SlowRefBaseline")
 	}
 	return nil
 }

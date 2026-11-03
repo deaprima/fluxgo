@@ -186,13 +186,9 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 
 	var p95, p99 float64
 	if success && generation == cb.machine.Generation() {
-		if !cb.estimator.IsWarmingUp() && cb.signalsReady() {
-			ptPrev := cb.selectPercentile(cb.rolling.Current())
-			latencyMs := latency.Seconds() * 1000
-			if ptPrev > 0 && latencyMs > ptPrev*cb.cfg.SlowRequestMargin {
-				failed = true
-				cb.collector.RecordDegraded()
-			}
+		if limit := cb.slowLimit(); limit > 0 && latency.Seconds()*1000 > limit {
+			failed = true
+			cb.collector.RecordDegraded()
 		}
 		p95, p99 = cb.collector.RecordLatency(latency)
 	} else {
@@ -252,6 +248,24 @@ func (cb *CircuitBreaker) handleTransition(from, to State) {
 	if cb.onStateChange != nil {
 		cb.onStateChange(cb.name, from, to)
 	}
+}
+
+// slowLimit returns the latency in milliseconds above which a successful
+// request is classified as slow, or 0 while classification is inactive. The
+// limit is taken before the request's own latency enters the rolling window,
+// so a request is never compared with itself.
+func (cb *CircuitBreaker) slowLimit() float64 {
+	if cb.estimator.IsWarmingUp() {
+		return 0
+	}
+	if cb.cfg.SlowRequestReference == SlowRefBaseline && !cb.estimator.NeedsCapture() {
+		_, Pbase := cb.estimator.Baseline()
+		return Pbase * cb.cfg.SlowRequestMargin
+	}
+	if !cb.signalsReady() {
+		return 0
+	}
+	return cb.selectPercentile(cb.rolling.Current()) * cb.cfg.SlowRequestMargin
 }
 
 // signalsReady reports whether the rolling window holds at least MinRequests
