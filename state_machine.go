@@ -12,6 +12,12 @@ import (
 // State represents the operational state of a circuit breaker.
 type State int
 
+// transition is a state change made by AllowRequest. The zero value means
+// that no transition occurred.
+type transition struct {
+	from, to State
+}
+
 const (
 	// StateClosed is the normal operating state; requests pass through.
 	StateClosed State = iota
@@ -91,29 +97,46 @@ func (sm *StateMachine) Generation() uint64 {
 	return sm.generation
 }
 
+// occurred reports whether t describes an actual state change.
+func (t transition) occurred() bool {
+	return t.from != t.to
+}
+
 // AllowRequest reports whether the next request may proceed and returns the
-// generation the request belongs to. If the circuit is Open and
-// RecoveryTimeout has elapsed, it first transitions to HalfOpen and reports
-// transitioned as true. It returns ErrOpenState while the circuit is Open and
-// ErrTooManyRequests once HalfOpenMaxRequests probes have been admitted in
-// the current half-open period.
-func (sm *StateMachine) AllowRequest() (generation uint64, transitioned bool, err error) {
+// generation the request belongs to. Before deciding, it may make one state
+// transition, which it reports in change:
+//   - Open to HalfOpen, once RecoveryTimeout has elapsed since the circuit
+//     opened.
+//   - HalfOpen to Open, once every probe slot has been taken and the circuit
+//     has been HalfOpen for RecoveryTimeout without a decision, so probes that
+//     never complete cannot keep the circuit half-open forever.
+//
+// It returns ErrOpenState while the circuit is Open and ErrTooManyRequests
+// once HalfOpenMaxRequests probes have been admitted in the current
+// half-open period.
+func (sm *StateMachine) AllowRequest() (generation uint64, change transition, err error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state == StateOpen && sm.now().Sub(sm.openedAt) >= sm.cfg.RecoveryTimeout {
+	switch {
+	case sm.state == StateOpen && sm.now().Sub(sm.openedAt) >= sm.cfg.RecoveryTimeout:
+		change = transition{from: StateOpen, to: StateHalfOpen}
 		sm.setState(StateHalfOpen)
-		transitioned = true
+	case sm.state == StateHalfOpen && sm.halfOpenRequests >= sm.cfg.HalfOpenMaxRequests &&
+		sm.now().Sub(sm.lastTransition) >= sm.cfg.RecoveryTimeout:
+		change = transition{from: StateHalfOpen, to: StateOpen}
+		sm.openedAt = sm.now()
+		sm.setState(StateOpen)
 	}
 	switch sm.state {
 	case StateOpen:
-		return sm.generation, transitioned, ErrOpenState
+		return sm.generation, change, ErrOpenState
 	case StateHalfOpen:
 		if sm.halfOpenRequests >= sm.cfg.HalfOpenMaxRequests {
-			return sm.generation, transitioned, ErrTooManyRequests
+			return sm.generation, change, ErrTooManyRequests
 		}
 		sm.halfOpenRequests++
 	}
-	return sm.generation, transitioned, nil
+	return sm.generation, change, nil
 }
 
 // EvaluateClosed transitions the circuit from Closed to Open when failureRate

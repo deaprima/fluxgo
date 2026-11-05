@@ -5,6 +5,7 @@ package fluxgo
 
 import (
 	"errors"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -30,6 +31,13 @@ type Settings struct {
 	// OnStateChange is an optional callback invoked whenever the circuit transitions
 	// between states. It receives the breaker name, the previous state, and the new state.
 	OnStateChange func(name string, from State, to State)
+
+	// IsSuccessful is an optional function that reports whether the error
+	// returned by a request counts as a success. If it is nil, only a nil
+	// error counts as a success. It matches gobreaker's Settings.IsSuccessful
+	// and can be used to ignore errors that do not indicate a downstream
+	// failure, such as context.Canceled.
+	IsSuccessful func(err error) bool
 }
 
 // Counts holds a point-in-time snapshot of request statistics.
@@ -63,6 +71,7 @@ type CircuitBreaker struct {
 	name          string
 	cfg           Config
 	onStateChange func(name string, from State, to State)
+	isSuccessful  func(err error) bool
 
 	ewma       *EWMA
 	rolling    *RollingPercentile
@@ -88,12 +97,17 @@ func newCircuitBreakerWithClock(s Settings, now func() time.Time) *CircuitBreake
 		panic("fluxgo: invalid config: " + err.Error())
 	}
 	cfg := s.Config
+	isSuccessful := s.IsSuccessful
+	if isSuccessful == nil {
+		isSuccessful = func(err error) bool { return err == nil }
+	}
 	ewma := NewEWMA(cfg.Alpha)
 	rolling := NewRollingPercentile(cfg.WindowSize)
 	return &CircuitBreaker{
 		name:          s.Name,
 		cfg:           cfg,
 		onStateChange: s.OnStateChange,
+		isSuccessful:  isSuccessful,
 		ewma:          ewma,
 		rolling:       rolling,
 		collector:     NewMetricCollector(ewma, rolling, NewOutcomeWindow(cfg.WindowSize)),
@@ -106,26 +120,29 @@ func newCircuitBreakerWithClock(s Settings, now func() time.Time) *CircuitBreake
 // Execute runs the given request if the circuit breaker allows it.
 // It returns ErrOpenState if the circuit is open and ErrTooManyRequests if
 // the circuit is half-open and the probe limit has been reached. If req
-// panics, the request is recorded as a failure and the panic is re-raised.
+// panics or calls runtime.Goexit, the request is recorded as a failure and
+// the panic or exit continues.
 func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
-	generation, toHalfOpen, err := cb.machine.AllowRequest()
-	if toHalfOpen {
-		cb.handleTransition(StateOpen, StateHalfOpen)
+	generation, change, err := cb.machine.AllowRequest()
+	if change.occurred() {
+		cb.handleTransition(change.from, change.to)
 	}
 	if err != nil {
 		return nil, err
 	}
 
 	start := time.Now()
+	completed := false
 	defer func() {
-		if r := recover(); r != nil {
+		if !completed {
 			cb.onRequestComplete(generation, time.Since(start), false)
-			panic(r)
 		}
 	}()
 
 	result, err := req()
-	cb.onRequestComplete(generation, time.Since(start), err == nil)
+	success := cb.isSuccessful(err)
+	completed = true
+	cb.onRequestComplete(generation, time.Since(start), success)
 	return result, err
 }
 
@@ -134,16 +151,19 @@ func (cb *CircuitBreaker) State() State {
 	return cb.machine.State()
 }
 
-// Counts returns a snapshot of the request counters.
+// Counts returns a snapshot of the request counters. Unlike gobreaker, the
+// totals cover the whole lifetime of the circuit breaker and are not cleared
+// on state changes, and TotalFailures includes requests classified as slow.
+// Values above math.MaxUint32 are reported as math.MaxUint32.
 func (cb *CircuitBreaker) Counts() Counts {
 	total := cb.collector.TotalRequests()
 	failures := cb.collector.TotalFailures()
 	return Counts{
-		Requests:             uint32(total),
-		TotalSuccesses:       uint32(total - failures),
-		TotalFailures:        uint32(failures),
-		ConsecutiveSuccesses: uint32(atomic.LoadInt64(&cb.consecutiveSuccesses)),
-		ConsecutiveFailures:  uint32(atomic.LoadInt64(&cb.consecutiveFailures)),
+		Requests:             saturate(total),
+		TotalSuccesses:       saturate(total - failures),
+		TotalFailures:        saturate(failures),
+		ConsecutiveSuccesses: saturate(atomic.LoadInt64(&cb.consecutiveSuccesses)),
+		ConsecutiveFailures:  saturate(atomic.LoadInt64(&cb.consecutiveFailures)),
 	}
 }
 
@@ -290,4 +310,15 @@ func (cb *CircuitBreaker) selectPercentile(p95, p99 float64) float64 {
 		return p99
 	}
 	return p95
+}
+
+// saturate converts n to uint32, clamping it to the range [0, math.MaxUint32].
+func saturate(n int64) uint32 {
+	if n <= 0 {
+		return 0
+	}
+	if n > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(n)
 }
