@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-
 var errDownstream = errors.New("downstream failure")
 
 func defaultSettings() Settings {
