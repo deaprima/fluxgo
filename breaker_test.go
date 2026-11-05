@@ -3,11 +3,16 @@
 package fluxgo
 
 import (
+	"context"
 	"errors"
+	"math"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
 
 var errDownstream = errors.New("downstream failure")
 
@@ -163,9 +168,9 @@ func TestCircuitBreaker_HalfOpenProbe_Failure_TransitionsToOpen(t *testing.T) {
 // latency-sensitive tests do not depend on time.Sleep precision, which varies
 // across operating systems and Go versions.
 func executeWithLatency(cb *CircuitBreaker, latency time.Duration, success bool) error {
-	generation, toHalfOpen, err := cb.machine.AllowRequest()
-	if toHalfOpen {
-		cb.handleTransition(StateOpen, StateHalfOpen)
+	generation, change, err := cb.machine.AllowRequest()
+	if change.occurred() {
+		cb.handleTransition(change.from, change.to)
 	}
 	if err != nil {
 		return err
@@ -775,5 +780,126 @@ func TestCircuitBreaker_SlowRefBaseline_UsesRecentWithoutValidBaseline(t *testin
 
 	if got := cb.collector.DegradedRequests(); got != before+1 {
 		t.Errorf("expected classification against the recent percentile, got %d new slow requests", got-before)
+	}
+}
+
+func TestCircuitBreaker_HalfOpen_StuckProbeReopensAfterRecoveryTimeout(t *testing.T) {
+	clock := newFakeClock()
+	s := defaultSettings()
+	var transitions []string
+	s.OnStateChange = func(_ string, from, to State) {
+		transitions = append(transitions, from.String()+"->"+to.String())
+	}
+	cb := newCircuitBreakerWithClock(s, clock.Now)
+
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	clock.Advance(s.Config.RecoveryTimeout)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cb.Execute(func() (interface{}, error) {
+			close(started)
+			<-release
+			return "ok", nil
+		})
+	}()
+	<-started
+
+	clock.Advance(s.Config.RecoveryTimeout)
+	if _, err := cb.Execute(func() (interface{}, error) { return "ok", nil }); !errors.Is(err, ErrOpenState) {
+		t.Fatalf("Execute() error = %v, want ErrOpenState once the probe has hung for RecoveryTimeout", err)
+	}
+
+	clock.Advance(s.Config.RecoveryTimeout)
+	if _, err := cb.Execute(func() (interface{}, error) { return "ok", nil }); err != nil {
+		t.Fatalf("Execute() error = %v, want a new probe to be admitted", err)
+	}
+	close(release)
+	<-done
+
+	want := []string{"closed->open", "open->half-open", "half-open->open", "open->half-open", "half-open->closed"}
+	if len(transitions) != len(want) {
+		t.Fatalf("transitions = %v, want %v", transitions, want)
+	}
+	for i := range want {
+		if transitions[i] != want[i] {
+			t.Fatalf("transitions = %v, want %v", transitions, want)
+		}
+	}
+}
+
+func TestCircuitBreaker_IsSuccessful_IgnoresSelectedErrors(t *testing.T) {
+	s := defaultSettings()
+	s.IsSuccessful = func(err error) bool {
+		return err == nil || errors.Is(err, context.Canceled)
+	}
+	cb := NewCircuitBreaker(s)
+
+	for i := 0; i < 50; i++ {
+		_, err := cb.Execute(func() (interface{}, error) { return nil, context.Canceled })
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Execute() error = %v, want the original error returned to the caller", err)
+		}
+	}
+
+	if cb.State() != StateClosed {
+		t.Errorf("State() = %v, want Closed when every error is counted as a success", cb.State())
+	}
+	if got := cb.Counts().TotalFailures; got != 0 {
+		t.Errorf("Counts().TotalFailures = %d, want 0", got)
+	}
+}
+
+func TestCircuitBreaker_IsSuccessful_CountsOtherErrorsAsFailures(t *testing.T) {
+	s := defaultSettings()
+	s.IsSuccessful = func(err error) bool {
+		return err == nil || errors.Is(err, context.Canceled)
+	}
+	cb := NewCircuitBreaker(s)
+
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+
+	if cb.State() != StateOpen {
+		t.Errorf("State() = %v, want Open after a downstream failure", cb.State())
+	}
+}
+
+func TestCircuitBreaker_Counts_SaturateAtMaxUint32(t *testing.T) {
+	cb := NewCircuitBreaker(defaultSettings())
+	atomic.StoreInt64(&cb.collector.totalRequests, math.MaxUint32+10)
+	atomic.StoreInt64(&cb.collector.totalFailures, 5)
+
+	c := cb.Counts()
+	if c.Requests != math.MaxUint32 || c.TotalSuccesses != math.MaxUint32 || c.TotalFailures != 5 {
+		t.Errorf("Counts() = %+v, want Requests and TotalSuccesses capped at MaxUint32, TotalFailures = 5", c)
+	}
+}
+
+func TestCircuitBreaker_GoexitRecordedAsFailure(t *testing.T) {
+	clock := newFakeClock()
+	s := defaultSettings()
+	cb := newCircuitBreakerWithClock(s, clock.Now)
+
+	cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	clock.Advance(s.Config.RecoveryTimeout)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cb.Execute(func() (interface{}, error) {
+			runtime.Goexit()
+			return nil, nil
+		})
+	}()
+	<-done
+
+	if cb.State() != StateOpen {
+		t.Errorf("State() = %v, want Open after the probe exited via runtime.Goexit", cb.State())
+	}
+	if got := cb.Counts().TotalFailures; got != 2 {
+		t.Errorf("Counts().TotalFailures = %d, want 2", got)
 	}
 }

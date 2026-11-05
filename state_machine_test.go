@@ -25,9 +25,9 @@ func tripAndRecover(t *testing.T, sm *StateMachine, advance func(time.Duration))
 		t.Fatal("expected Closed -> Open")
 	}
 	advance(sm.cfg.RecoveryTimeout + time.Second)
-	gen, transitioned, err := sm.AllowRequest()
-	if err != nil || !transitioned {
-		t.Fatalf("AllowRequest() = (%d, %v, %v), want Open -> HalfOpen", gen, transitioned, err)
+	gen, change, err := sm.AllowRequest()
+	if err != nil || change != (transition{from: StateOpen, to: StateHalfOpen}) {
+		t.Fatalf("AllowRequest() = (%d, %v, %v), want Open -> HalfOpen", gen, change, err)
 	}
 	return gen
 }
@@ -281,8 +281,47 @@ func TestStateMachine_AllowRequest_ReportsTransitionOccurred(t *testing.T) {
 
 	tripAndRecover(t, sm, advance)
 
-	_, transitioned, err := sm.AllowRequest()
-	if err != nil || transitioned {
-		t.Fatalf("AllowRequest() = (%v, %v), want (false, nil) when already HalfOpen", transitioned, err)
+	_, change, err := sm.AllowRequest()
+	if err != nil || change.occurred() {
+		t.Fatalf("AllowRequest() = (%v, %v), want no transition when already HalfOpen", change, err)
+	}
+
+}
+
+func TestStateMachine_HalfOpen_ReopensWhenProbesNeverComplete(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	now, advance := smClock(time.Now())
+	sm := newStateMachineWithClock(cfg, now)
+
+	staleGen := tripAndRecover(t, sm, advance)
+	advance(cfg.RecoveryTimeout)
+
+	_, change, err := sm.AllowRequest()
+	if change != (transition{from: StateHalfOpen, to: StateOpen}) || !errors.Is(err, ErrOpenState) {
+		t.Fatalf("AllowRequest() = (%v, %v), want HalfOpen -> Open with ErrOpenState", change, err)
+	}
+	if sm.OnHalfOpenSuccess(staleGen) {
+		t.Error("expected the late probe result to be ignored")
+	}
+
+	advance(cfg.RecoveryTimeout)
+	if _, change, err := sm.AllowRequest(); err != nil || !change.occurred() {
+		t.Errorf("AllowRequest() = (%v, %v), want a new half-open period", change, err)
+	}
+}
+
+func TestStateMachine_HalfOpen_StaysOpenWhileProbeSlotsRemain(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cfg.HalfOpenMaxRequests = 2
+	now, advance := smClock(time.Now())
+	sm := newStateMachineWithClock(cfg, now)
+
+	tripAndRecover(t, sm, advance)
+	advance(cfg.RecoveryTimeout)
+
+	if _, change, err := sm.AllowRequest(); err != nil || change.occurred() {
+		t.Errorf("AllowRequest() = (%v, %v), want the remaining probe slot to be admitted", change, err)
 	}
 }

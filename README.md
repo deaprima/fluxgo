@@ -97,6 +97,14 @@ failure rate hovers near the adaptive threshold.
 > original circuit breaker design. It is documented as a justified deviation
 > because it prevents instability at the cost of slightly delaying re-trip.
 
+## Half-Open Timeout
+
+If every Half-Open probe slot is taken and no probe has completed within
+`RecoveryTimeout` (for example, because the downstream hangs and the caller
+sets no timeout), the circuit returns to Open instead of rejecting requests
+with `ErrTooManyRequests` forever. A late result from such a probe is ignored,
+and a new probe is admitted after the next `RecoveryTimeout`.
+
 ## Recovery Behavior
 
 When a probe succeeds and the circuit moves from Half-Open to Closed, the EWMA
@@ -145,6 +153,24 @@ during warm-up and while only a fallback baseline exists, it behaves like
 > `SlowRefRecent`, a downstream that becomes slower without returning errors
 > keeps the circuit closed.
 
+## Ignoring Errors
+
+By default, any non-nil error counts as a failure. Use `Settings.IsSuccessful`
+(same semantics as gobreaker) to count errors that do not indicate a
+downstream failure as successes:
+
+```go
+cb := fluxgo.NewCircuitBreaker(fluxgo.Settings{
+    Config: fluxgo.DefaultConfig(),
+    IsSuccessful: func(err error) bool {
+        return err == nil || errors.Is(err, context.Canceled)
+    },
+})
+```
+
+The error is still returned to the caller unchanged. If the request panics or
+calls `runtime.Goexit`, it is always recorded as a failure.
+
 ## Observability
 
 `Snapshot()` returns a point-in-time read-only view of all internal signals:
@@ -190,7 +216,8 @@ Benchmark on Intel Core i5-11300H @ 3.10GHz:
 | `NewCircuitBreaker(Settings)` | `NewCircuitBreaker(Settings)` | Same signature; panics on invalid Config |
 | `cb.Execute(req)` | `cb.Execute(req)` | Identical |
 | `cb.State()` | `cb.State()` | Identical |
-| `cb.Counts()` | `cb.Counts()` | Compatible fields |
+| `cb.Counts()` | `cb.Counts()` | Same fields, different meaning: totals cover the breaker's lifetime (not cleared on state change), `TotalFailures` includes slow requests, and values saturate at `math.MaxUint32` |
+| `Settings.IsSuccessful` | `Settings.IsSuccessful` | Same semantics; nil counts only nil errors as success |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |
 | `ErrTooManyRequests` | `ErrTooManyRequests` | Same sentinel error when Half-Open probe quota is reached |
 | — | `cb.Snapshot()` | fluxgo-only: observability accessor |
