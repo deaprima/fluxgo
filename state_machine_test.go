@@ -325,3 +325,17 @@ func TestStateMachine_HalfOpen_StaysOpenWhileProbeSlotsRemain(t *testing.T) {
 		t.Errorf("AllowRequest() = (%v, %v), want the remaining probe slot to be admitted", change, err)
 	}
 }
+
+func TestState_String(t *testing.T) {
+	tests := map[State]string{
+		StateClosed:   "closed",
+		StateOpen:     "open",
+		StateHalfOpen: "half-open",
+		State(99):     "unknown",
+	}
+	for state, want := range tests {
+		if got := state.String(); got != want {
+			t.Errorf("State(%d).String() = %q, want %q", int(state), got, want)
+		}
+	}
+}

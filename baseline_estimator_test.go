@@ -141,3 +141,24 @@ func TestBaselineEstimator_NoValidCaptureBelowMinRequests(t *testing.T) {
 		t.Fatal("expected no valid capture from fewer than MinRequests outcomes")
 	}
 }
+
+func TestNewBaselineEstimator_StartsWarmingUp(t *testing.T) {
+	b := NewBaselineEstimator(DefaultConfig())
+	if !b.IsWarmingUp() || !b.NeedsCapture() {
+		t.Fatal("expected a new estimator to be warming up")
+	}
+}
+
+func TestBaselineEstimator_ValidBaselineIsLocked(t *testing.T) {
+	clock := newFakeClock()
+	cfg := DefaultConfig()
+	cfg.WarmupDuration = 0
+	b := newBaselineEstimatorWithClock(cfg, clock.Now)
+
+	observeHealthy(b, cfg, 20, 40)
+	observeHealthy(b, cfg, 500, 900)
+
+	if sbase, pbase := b.Baseline(); sbase != 20 || pbase != 40 {
+		t.Fatalf("expected the valid baseline (20, 40) to be locked, got (%v, %v)", sbase, pbase)
+	}
+}

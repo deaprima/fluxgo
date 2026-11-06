@@ -31,3 +31,16 @@ func BenchmarkExecute_Open(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkExecute_Closed_Serial measures the pipeline without lock contention,
+// as a reference for the parallel BenchmarkExecute_Closed.
+func BenchmarkExecute_Closed_Serial(b *testing.B) {
+	cb := NewCircuitBreaker(defaultSettings())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cb.Execute(func() (interface{}, error) {
+			return nil, nil
+		})
+	}
+}

@@ -902,3 +902,30 @@ func TestCircuitBreaker_GoexitRecordedAsFailure(t *testing.T) {
 		t.Errorf("Counts().TotalFailures = %d, want 2", got)
 	}
 }
+
+func TestCircuitBreaker_PercentileTarget99_UsedEndToEnd(t *testing.T) {
+	s := defaultSettings()
+	s.Config.PercentileTarget = 99
+	cb := newCircuitBreakerWithClock(s, newFakeClock().Now)
+
+	for i := 1; i <= s.Config.WindowSize; i++ {
+		executeWithLatency(cb, time.Duration(i)*time.Millisecond, true)
+	}
+
+	snap := cb.Snapshot()
+	if math.Abs(snap.Pt-99) > 1e-6 {
+		t.Errorf("Pt = %v, want the P99 of 1..100ms (99)", snap.Pt)
+	}
+	if math.Abs(snap.Pbase-99) > 1e-6 {
+		t.Errorf("Pbase = %v, want the P99 of 1..100ms (99)", snap.Pbase)
+	}
+}
+
+func TestNewCircuitBreaker_PanicsOnInvalidConfig(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected NewCircuitBreaker to panic on an invalid config")
+		}
+	}()
+	NewCircuitBreaker(Settings{Name: "test", Config: Config{}})
+}

@@ -71,3 +71,14 @@ func TestAdaptiveThresholdCalculator_ZeroPbase_ReturnsThetaBase(t *testing.T) {
 		t.Errorf("Calculate() = %f, want ThetaBase=%f when Pbase=0", got, cfg.ThetaBase)
 	}
 }
+
+func TestAdaptiveThresholdCalculator_ZeroSignals_ReturnsThetaMax(t *testing.T) {
+	cfg := DefaultConfig()
+	calc := NewAdaptiveThresholdCalculator(cfg)
+
+	// St = Pt = 0 → Dt = 0, which must not cause a division by zero.
+	got := calc.Calculate(0, 0, 100.0, 120.0)
+	if got != cfg.ThetaMax {
+		t.Errorf("Calculate() = %f, want ThetaMax=%f when Dt=0", got, cfg.ThetaMax)
+	}
+}
