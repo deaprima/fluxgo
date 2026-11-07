@@ -4,6 +4,7 @@
 // Algorithm: circular buffer with in-place binary insertion sort.
 // Time complexity: O(n) per Update (binary search O(log n) + memmove O(n)).
 // Space complexity: O(n) pre-allocated, zero-allocation at runtime.
+
 package fluxgo
 
 import (

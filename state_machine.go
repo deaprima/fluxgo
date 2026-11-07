@@ -2,6 +2,7 @@
 // including anti-flapping protection via a minimum dwell time, a bounded
 // number of half-open probes, and generation tracking that discards results
 // of requests admitted before the latest transition.
+
 package fluxgo
 
 import (

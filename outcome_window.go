@@ -1,6 +1,7 @@
 // outcome_window.go implements OutcomeWindow, a fixed-size count-based
 // sliding window of request outcomes used to compute the failure rate
 // evaluated by the state machine.
+
 package fluxgo
 
 import "sync"

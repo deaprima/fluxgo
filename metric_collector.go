@@ -1,6 +1,7 @@
 // metric_collector.go implements MetricCollector, which records per-request
 // latency and outcome, forwarding data to the EWMA, rolling percentile, and
 // outcome window engines.
+
 package fluxgo
 
 import (

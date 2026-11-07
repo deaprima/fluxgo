@@ -1,5 +1,7 @@
 # fluxgo
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/deaprima/fluxgo.svg)](https://pkg.go.dev/github.com/deaprima/fluxgo)
+
 An adaptive circuit breaker for Go services that follows the calling pattern of
 [gobreaker](https://github.com/sony/gobreaker) (`Execute`, `State`, `Counts`).
 
