@@ -5,6 +5,10 @@ package fluxgo
 
 import "sync"
 
+// OutcomeWindow is a fixed-size sliding window of the most recent request
+// outcomes. Each transition of the circuit moves it to a new generation, which
+// empties the window, and outcomes from older generations are ignored. It is
+// safe for concurrent use.
 type OutcomeWindow struct {
 	mu         sync.Mutex
 	buf        []bool
