@@ -1,6 +1,6 @@
 // breaker.go implements CircuitBreaker, the main public API of fluxgo.
 // It wires all internal components into a single thread-safe entry point
-// that is API-compatible with gobreaker.
+// that follows the calling pattern of gobreaker.
 package fluxgo
 
 import (

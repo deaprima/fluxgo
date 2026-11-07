@@ -61,8 +61,9 @@ type Config struct {
 	// It must not exceed 1, otherwise the circuit could never trip.
 	ThetaMax float64
 
-	// WarmupDuration is the period during which baseline statistics are collected
-	// before adaptive thresholds take effect.
+	// WarmupDuration is the minimum period during which baseline statistics are
+	// collected before adaptive thresholds take effect. Warm-up also continues
+	// until the rolling window holds WindowSize latencies.
 	WarmupDuration time.Duration
 
 	// WarmupMaxFailRate is the maximum allowed failure rate for a baseline capture
@@ -78,7 +79,8 @@ type Config struct {
 
 	// MinRequests is the minimum number of requests that must be present in
 	// the outcome window before the failure rate is evaluated against the
-	// threshold. It must be between 1 and WindowSize. Default: 20.
+	// threshold, and before a baseline can be captured as valid. It must be
+	// between 1 and WindowSize. Default: 20.
 	MinRequests int
 
 	// HalfOpenMaxRequests is the number of probe requests allowed through
@@ -87,8 +89,8 @@ type Config struct {
 	// and reopens on the first failed probe. Must be at least 1. Default: 1.
 	HalfOpenMaxRequests int
 
-	// SlowRequestMargin is the multiplier applied to the current rolling percentile
-	// to classify a request as degraded.
+	// SlowRequestMargin is the multiplier applied to the latency selected by
+	// SlowRequestReference to classify a request as degraded.
 	// Must be greater than zero. Default: 2.0.
 	SlowRequestMargin float64
 

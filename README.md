@@ -1,7 +1,7 @@
 # fluxgo
 
-An adaptive circuit breaker for Go services, API-compatible with
-[gobreaker](https://github.com/sony/gobreaker).
+An adaptive circuit breaker for Go services that follows the calling pattern of
+[gobreaker](https://github.com/sony/gobreaker) (`Execute`, `State`, `Counts`).
 
 fluxgo computes a dynamic failure-rate threshold (**θₜ**) from real-time latency
 signals (EWMA + P95/P99 rolling percentile) instead of relying on a fixed
@@ -41,23 +41,27 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 
 | Parameter | Default | Description |
 |---|---|---|
-| `Alpha` | `0.3` | EWMA smoothing factor (0 < α ≤ 1). Locked in range 0.1–0.3. |
-| `WindowSize` | `100` | Rolling percentile window size. Locked; not a tuning parameter. |
-| `PercentileTarget` | `95` | Latency percentile to track: 95 or 99. Locked at 95. |
+| `Alpha` | `0.3` | EWMA smoothing factor (0 < α ≤ 1). Not tuned in the thesis experiments; still configurable. |
+| `WindowSize` | `100` | Size of the rolling percentile and outcome windows. Not tuned in the thesis experiments; still configurable. |
+| `PercentileTarget` | `95` | Latency percentile to track: 95 or 99. Not tuned in the thesis experiments; still configurable. |
 | `W1` | `0.4` | Weight of EWMA signal in degradation ratio |
 | `W2` | `0.6` | Weight of P95/P99 signal (W1 + W2 = 1) |
 | `ThetaBase` | `0.6` | Baseline failure-rate threshold |
 | `ThetaMin` | `0.05` | Minimum adaptive threshold (clamp floor) |
 | `ThetaMax` | `0.9` | Maximum adaptive threshold (clamp ceiling) |
-| `WarmupDuration` | `30s` | Observation period before adaptive threshold activates. 0 = no warmup. |
+| `WarmupDuration` | `30s` | Minimum observation period before the adaptive threshold activates. 0 = no minimum. |
 | `WarmupMaxFailRate` | `0.05` | Max failure rate for a valid warmup capture |
 | `RecoveryTimeout` | `60s` | Time Open before transitioning to Half-Open |
-| `MinDwellTime` | `5s` | Minimum time between state transitions (anti-flapping) |
-| `MinRequests` | `20` | Minimum volume in outcome window before evaluating failure rate |
-| `HalfOpenMaxRequests` | `1` | Max concurrent probe requests admitted while Half-Open |
-| `SlowRequestMargin` | `2.0` | Multiplier on Pt; requests with latency > Pt × margin are classified as degraded. Locked at 2.0. |
+| `MinDwellTime` | `5s` | Minimum time after a transition before the circuit can trip to Open (anti-flapping) |
+| `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
+| `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
+| `SlowRequestMargin` | `2.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefRecent` | Reference for slow request classification: `SlowRefRecent` (current Pt) or `SlowRefBaseline` (healthy Pbase once a valid baseline is captured). See [Slow Request Classification](#slow-request-classification). |
 | `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
+
+> **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
+> samples is the second largest value, which is statistically unstable. Use a
+> larger window if you need P99.
 
 ## Adaptive Threshold Formula
 
@@ -78,8 +82,10 @@ Warm-up starts at the first request (not at construction) and lasts at least
 `WarmupDuration` (default 30s). It also continues until the rolling percentile
 window holds `WindowSize` latency samples, so the baseline is never taken from
 a handful of requests; under low traffic, warm-up can therefore last longer
-than `WarmupDuration`. During warm-up, the circuit trips on the static
-`ThetaBase` threshold, preventing false trips on cold-start traffic.
+than `WarmupDuration`. During warm-up, the circuit trips on the static `ThetaBase` threshold, preventing
+false trips on cold-start traffic. This is comparable to gobreaker with a custom
+`ReadyToTrip` at a 0.6 failure ratio over at least `MinRequests` requests, not to
+gobreaker's default (more than 5 consecutive failures).
 
 A baseline is captured as valid only when the circuit is Closed, the outcome
 window holds at least `MinRequests` outcomes, and the failure rate is below
@@ -88,9 +94,8 @@ fallback baseline, and fluxgo keeps trying to capture a valid one.
 
 ## Anti-Flapping
 
-fluxgo enforces a minimum dwell time (`MinDwellTime`) between consecutive
-state transitions. After any transition, the circuit cannot trip to Open again
-until `MinDwellTime` has elapsed. This prevents rapid oscillation when the
+fluxgo enforces a minimum dwell time (`MinDwellTime`). After any transition, the
+circuit cannot trip from Closed to Open until `MinDwellTime` has elapsed. This prevents rapid oscillation when the
 failure rate hovers near the adaptive threshold.
 
 > **Note:** `MinDwellTime` is an implementation safeguard not described in the
@@ -112,19 +117,20 @@ and rolling percentile are reset, because they still describe the degradation
 that tripped the circuit. The healthy baseline (`Sbase`, `Pbase`) is kept.
 
 Until the rolling window holds `MinRequests` new latency samples, the circuit
-trips on the static `ThetaBase` threshold and slow request classification is
-inactive. After that, the adaptive threshold resumes with signals that reflect
-the downstream's current behavior. This prevents a recovered service from being
-tripped again by stale latency data.
+trips on the static `ThetaBase` threshold, and slow request classification is
+inactive with `SlowRefRecent` (`SlowRefBaseline` keeps classifying, because
+`Pbase` does not depend on the reset window). After that, the adaptive threshold
+resumes with signals that reflect the downstream's current behavior. This
+prevents a recovered service from being tripped again by stale latency data.
 
 Latencies of requests admitted before the latest state transition are ignored,
 just like their outcomes.
 
 ## Slow Request Classification
 
-Beyond explicit errors, fluxgo classifies a request as **degraded** if its
-latency exceeds `Pt × SlowRequestMargin` (default: P95 × 2.0). A degraded
-request is counted as a failure in the internal failure rate.
+Beyond explicit errors, fluxgo classifies a successful request as **degraded** if
+its latency exceeds the reference × `SlowRequestMargin` (by default, P95 × 2.0).
+A degraded request is counted as a failure in the internal failure rate.
 
 ```
 latency > P95 × 2.0  →  treated as failure internally
@@ -132,9 +138,9 @@ latency > P95 × 2.0  →  treated as failure internally
 ```
 
 **Rules:**
-- Classification is inactive during warmup and while the rolling window holds fewer than `MinRequests` latencies (for example, right after recovery)
+- Classification is inactive during warmup; with `SlowRefRecent`, it is also inactive while the rolling window holds fewer than `MinRequests` latencies (for example, right after recovery)
 - The percentile snapshot is taken **before** the current latency enters the window (no self-comparison)
-- The result and error values returned by `Execute()` to the caller are **not affected** — gobreaker API compatibility is preserved
+- The result and error values returned by `Execute()` to the caller are **not affected**
 - Degraded requests are observable via `Snapshot().DegradedRequests`
 
 **Reference (`SlowRequestReference`):**
@@ -201,25 +207,39 @@ dashboard tooling. All fields are read under their respective component locks.
 
 where `n = Config.WindowSize` (default 100).
 
-Benchmark on Intel Core i5-11300H @ 3.10GHz:
+Benchmark on Intel Core i5-11300H @ 3.10GHz (Windows, Go 1.26, 8 threads), all
+with 0 allocations. Run `make bench` and `make bench-compare` to reproduce;
+absolute numbers vary by machine and load.
 
-| Benchmark / State | Latency/call | Allocations |
+| Benchmark | fluxgo | gobreaker v1.0.0 |
 |---|---|---|
-| `RollingPercentile.Update()` | ~65 ns | 0 allocs / 0 B |
-| `Execute()` Closed (full pipeline) | ~656 ns | 0 allocs / 0 B |
-| `Execute()` Open (fast reject) | ~57 ns | 0 allocs / 0 B |
+| `Execute()` Closed, serial | ~330 ns | ~40 ns |
+| `Execute()` Closed, parallel | ~630 ns | ~120 ns |
+| `Execute()` Open (fast reject) | ~58 ns | ~59 ns |
+| `RollingPercentile.Update()` | ~46 ns | — |
 
 ## API Compatibility with gobreaker
 
+fluxgo follows gobreaker's calling pattern, so code that calls `Execute`, `State`,
+and `Counts` needs little change. It is not a drop-in replacement: `Settings`
+differs, and the trip decision is the adaptive threshold rather than a callback.
+
 | gobreaker | fluxgo | Note |
 |---|---|---|
-| `NewCircuitBreaker(Settings)` | `NewCircuitBreaker(Settings)` | Same signature; panics on invalid Config |
-| `cb.Execute(req)` | `cb.Execute(req)` | Identical |
-| `cb.State()` | `cb.State()` | Identical |
+| `NewCircuitBreaker(Settings)` | `NewCircuitBreaker(Settings)` | Different `Settings` type; panics on invalid `Config` |
+| `cb.Execute(req)` | `cb.Execute(req)` | Same signature |
+| `cb.State()` | `cb.State()` | Same three states |
 | `cb.Counts()` | `cb.Counts()` | Same fields, different meaning: totals cover the breaker's lifetime (not cleared on state change), `TotalFailures` includes slow requests, and values saturate at `math.MaxUint32` |
+| `Settings.Name` | `Settings.Name` | Same |
+| `Settings.OnStateChange` | `Settings.OnStateChange` | Same signature, with fluxgo's `State` type |
 | `Settings.IsSuccessful` | `Settings.IsSuccessful` | Same semantics; nil counts only nil errors as success |
+| `Settings.MaxRequests` | `Config.HalfOpenMaxRequests` | Same role |
+| `Settings.Timeout` | `Config.RecoveryTimeout` | Same role |
+| `Settings.ReadyToTrip` | — | Replaced by the adaptive threshold |
+| `Settings.Interval` | — | The outcome window is count-based |
+| `cb.Name()`, `TwoStepCircuitBreaker` | — | Not provided |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |
-| `ErrTooManyRequests` | `ErrTooManyRequests` | Same sentinel error when Half-Open probe quota is reached |
+| `ErrTooManyRequests` | `ErrTooManyRequests` | Same sentinel error when the Half-Open probe quota is reached |
 | — | `cb.Snapshot()` | fluxgo-only: observability accessor |
 
 ## Mode Switching for Testbed (CB_MODE)
