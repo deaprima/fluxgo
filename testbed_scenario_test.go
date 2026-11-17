@@ -209,10 +209,19 @@ func TestTestbedScenario_TrafficSpike(t *testing.T) {
 func TestTestbedScenario_SuddenFailure(t *testing.T) {
 	const faultStart = 60 * time.Second
 	res := runTestbedScenario(DefaultConfig(), faultStart, tbSuddenFailure)
-	t.Logf("%v", res)
+	t.Logf("default:                 %v", res)
 	if res.fluxgo < 0 || res.gobreaker < 0 {
 		t.Fatalf("%v, want both breakers to open", res)
 	}
+	// With the same consecutive-failure rule as the testbed's gobreaker,
+	// fluxgo must not detect a total failure later.
+	if res.fluxgo > res.gobreaker {
+		t.Errorf("%v, want fluxgo no later than gobreaker", res)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ConsecutiveFailures = 0
+	t.Logf("ConsecutiveFailures=0:   %v", runTestbedScenario(cfg, faultStart, tbSuddenFailure))
 }
 
 // TestTestbedScenario_SlowRefBaselineMarginSweep shows how SlowRequestMargin

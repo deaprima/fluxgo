@@ -84,6 +84,14 @@ type Config struct {
 	// between 1 and WindowSize. Default: 20.
 	MinRequests int
 
+	// ConsecutiveFailures opens the circuit from Closed once this many
+	// requests in a row have failed, regardless of the failure rate and
+	// MinRequests. Only requests that IsSuccessful reports as failed count;
+	// requests classified as slow do not, so a latency spike cannot trip the
+	// circuit this way. MinDwellTime still applies. 0 disables the rule.
+	// Default: 5.
+	ConsecutiveFailures int
+
 	// HalfOpenMaxRequests is the number of probe requests allowed through
 	// while the circuit is Half-Open. Further requests are rejected with
 	// ErrTooManyRequests. The circuit closes once this many probes succeed
@@ -122,6 +130,7 @@ func DefaultConfig() Config {
 		RecoveryTimeout:      60 * time.Second,
 		MinDwellTime:         5 * time.Second,
 		MinRequests:          20,
+		ConsecutiveFailures:  5,
 		HalfOpenMaxRequests:  1,
 		SlowRequestMargin:    2.0,
 		SlowRequestReference: SlowRefRecent,
@@ -169,6 +178,9 @@ func (c Config) Validate() error {
 	}
 	if c.MinDwellTime < 0 {
 		return errors.New("min dwell time must be non-negative")
+	}
+	if c.ConsecutiveFailures < 0 {
+		return errors.New("consecutive failures must be non-negative")
 	}
 	if c.HalfOpenMaxRequests < 1 {
 		return errors.New("half-open max requests must be at least 1")

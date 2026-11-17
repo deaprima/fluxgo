@@ -14,6 +14,11 @@
 - The minimum Go version is lowered from 1.26.4 to 1.21.
 
 ### Added
+- `Config.ConsecutiveFailures` (default 5): a Closed circuit opens after that
+  many errors in a row, regardless of the failure rate and `MinRequests`. Slow
+  requests do not count. Before, a total failure after a healthy period needed
+  about 60 failed requests to fill the outcome window. Set it to 0 for the
+  previous behavior.
 - `Config.SlowRequestReference`: classify slow requests against the recent
   percentile (`SlowRefRecent`, default) or the healthy baseline (`SlowRefBaseline`).
 - `Settings.IsSuccessful`, with the same semantics as gobreaker.

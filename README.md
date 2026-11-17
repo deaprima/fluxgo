@@ -56,6 +56,7 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `RecoveryTimeout` | `60s` | Time Open before transitioning to Half-Open |
 | `MinDwellTime` | `5s` | Minimum time after a transition before the circuit can trip to Open (anti-flapping) |
 | `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
+| `ConsecutiveFailures` | `5` | Errors in a row that open the circuit regardless of the failure rate; slow requests do not count. 0 disables it. See [Consecutive Failures](#consecutive-failures). |
 | `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
 | `SlowRequestMargin` | `2.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefRecent` | Reference for slow request classification: `SlowRefRecent` (current Pt) or `SlowRefBaseline` (healthy Pbase once a valid baseline is captured). See [Slow Request Classification](#slow-request-classification). |
@@ -78,6 +79,30 @@ When latency doubles (`Dt = 2`), `theta_t` halves — the circuit trips at half
 the failure rate compared to a static threshold. When latency improves
 (`Dt < 1`), `theta_t` rises — the circuit becomes more tolerant.
 
+A Closed circuit opens when either rule is met (subject to `MinDwellTime`):
+
+- the outcome window holds at least `MinRequests` outcomes and its failure
+  rate reaches `theta_t`, or
+- `ConsecutiveFailures` requests in a row have failed.
+
+## Consecutive Failures
+
+The failure rate is computed over a window of `WindowSize` outcomes. After a
+long healthy period, a total failure must fill a large part of that window
+before the rate reaches `theta_t`: with the defaults, about 60 failed requests.
+Failed requests do not feed the latency signals, so `theta_t` does not drop to
+help. `ConsecutiveFailures` (default 5) opens the circuit after that many errors
+in a row, so a total failure is detected as fast as by gobreaker.
+
+Only requests that `IsSuccessful` reports as failed count. Requests classified
+as slow count toward the failure rate but not toward this rule, so a burst of
+slow requests during a traffic spike cannot open the circuit through it. The
+run restarts after any success and on every state transition.
+
+The rule matches a gobreaker `ReadyToTrip` that returns true at
+`ConsecutiveFailures >= 5`. gobreaker's default `ReadyToTrip` trips at more
+than 5 consecutive failures, which is `ConsecutiveFailures = 6`.
+
 ## Warmup Period
 
 Warm-up starts at the first request (not at construction) and lasts at least
@@ -85,9 +110,9 @@ Warm-up starts at the first request (not at construction) and lasts at least
 window holds `WindowSize` latency samples, so the baseline is never taken from
 a handful of requests; under low traffic, warm-up can therefore last longer
 than `WarmupDuration`. During warm-up, the circuit trips on the static `ThetaBase` threshold, preventing
-false trips on cold-start traffic. This is comparable to gobreaker with a custom
-`ReadyToTrip` at a 0.6 failure ratio over at least `MinRequests` requests, not to
-gobreaker's default (more than 5 consecutive failures).
+false trips on cold-start traffic, or on `ConsecutiveFailures`. This is comparable to gobreaker with a custom
+`ReadyToTrip` that trips at 5 consecutive failures or at a 0.6 failure ratio over
+at least `MinRequests` requests.
 
 A baseline is captured as valid only when the circuit is Closed, the outcome
 window holds at least `MinRequests` outcomes, and the failure rate is below
@@ -237,7 +262,7 @@ differs, and the trip decision is the adaptive threshold rather than a callback.
 | `Settings.IsSuccessful` | `Settings.IsSuccessful` | Same semantics; nil counts only nil errors as success |
 | `Settings.MaxRequests` | `Config.HalfOpenMaxRequests` | Same role |
 | `Settings.Timeout` | `Config.RecoveryTimeout` | Same role |
-| `Settings.ReadyToTrip` | — | Replaced by the adaptive threshold |
+| `Settings.ReadyToTrip` | — | Replaced by the adaptive threshold and `Config.ConsecutiveFailures` |
 | `Settings.Interval` | — | The outcome window is count-based |
 | `cb.Name()`, `TwoStepCircuitBreaker` | — | Not provided |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |

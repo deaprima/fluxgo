@@ -128,23 +128,35 @@ func TestScenario_GradualDegradationWithErrors(t *testing.T) {
 }
 
 func TestScenario_SuddenFailure(t *testing.T) {
-	cfg := DefaultConfig()
-	s := newScenario(cfg)
-	s.warmUp(t)
+	failing := func(int) (time.Duration, bool) { return 10 * time.Millisecond, false }
 
-	// Failed requests do not feed the latency signals, so the threshold stays
-	// near ThetaBase and the window must fill to that failure rate.
-	sent := s.driveUntilOpen(cfg.WindowSize, func(int) (time.Duration, bool) {
-		return 10 * time.Millisecond, false
+	t.Run("ConsecutiveFailures", func(t *testing.T) {
+		cfg := DefaultConfig()
+		s := newScenario(cfg)
+		s.warmUp(t)
+
+		if sent := s.driveUntilOpen(cfg.WindowSize, failing); sent != cfg.ConsecutiveFailures {
+			t.Errorf("opened after %d failed requests, want %d", sent, cfg.ConsecutiveFailures)
+		}
 	})
 
-	if sent == 0 {
-		t.Fatal("expected the circuit to open within one window of failures")
-	}
-	t.Logf("opened after %d failed requests", sent)
-	if limit := int(cfg.ThetaMax * float64(cfg.WindowSize)); sent > limit {
-		t.Errorf("opened after %d failed requests, want at most %d", sent, limit)
-	}
+	t.Run("FailureRateOnly", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ConsecutiveFailures = 0
+		s := newScenario(cfg)
+		s.warmUp(t)
+
+		// Failed requests do not feed the latency signals, so the threshold
+		// stays near ThetaBase and the window must fill to that failure rate.
+		sent := s.driveUntilOpen(cfg.WindowSize, failing)
+		if sent == 0 {
+			t.Fatal("expected the circuit to open within one window of failures")
+		}
+		t.Logf("opened after %d failed requests", sent)
+		if limit := int(cfg.ThetaMax * float64(cfg.WindowSize)); sent > limit {
+			t.Errorf("opened after %d failed requests, want at most %d", sent, limit)
+		}
+	})
 }
 
 func TestScenario_FullFailureAndRecoveryCycle(t *testing.T) {

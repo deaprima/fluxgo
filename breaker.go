@@ -83,6 +83,10 @@ type CircuitBreaker struct {
 
 	consecutiveSuccesses int64
 	consecutiveFailures  int64
+
+	// consecutiveErrors counts requests in a row that IsSuccessful reported
+	// as failed, ignoring slow classification, for Config.ConsecutiveFailures.
+	consecutiveErrors int64
 }
 
 // NewCircuitBreaker returns a CircuitBreaker wired and ready to use.
@@ -199,9 +203,10 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 // onRequestComplete runs the post-request decision pipeline for a request
 // admitted in the given generation: classify slow requests, record latency
 // and outcome, feed the baseline estimator, and evaluate the state machine
-// against the current threshold. success reports whether req returned a nil
-// error; only latencies of such requests feed the latency signals, and only
-// if they were admitted in the current generation.
+// against the current threshold and the run of consecutive errors. success
+// reports whether IsSuccessful accepted the request's error; only latencies
+// of such requests feed the latency signals, and only if they were admitted
+// in the current generation.
 func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Duration, success bool) {
 	failed := !success
 
@@ -224,6 +229,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 		atomic.StoreInt64(&cb.consecutiveFailures, 0)
 		atomic.AddInt64(&cb.consecutiveSuccesses, 1)
 	}
+	streak := cb.recordErrorStreak(generation, success)
 
 	St := cb.ewma.Value()
 	Pt := cb.selectPercentile(p95, p99)
@@ -247,10 +253,35 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 			cb.handleTransition(StateHalfOpen, StateOpen)
 		}
 	case StateClosed:
-		if n >= cb.cfg.MinRequests && cb.machine.EvaluateClosed(generation, fr, thetaT) {
+		if cb.shouldTrip(n, fr, thetaT, streak) && cb.machine.tripClosed(generation) {
 			cb.handleTransition(StateClosed, StateOpen)
 		}
 	}
+}
+
+// recordErrorStreak updates the run of consecutive errors with a request
+// admitted in the given generation and returns the run's length. Results from
+// an earlier generation are ignored, because the run restarts on every
+// transition.
+func (cb *CircuitBreaker) recordErrorStreak(generation uint64, success bool) int64 {
+	if generation != cb.machine.Generation() {
+		return 0
+	}
+	if success {
+		atomic.StoreInt64(&cb.consecutiveErrors, 0)
+		return 0
+	}
+	return atomic.AddInt64(&cb.consecutiveErrors, 1)
+}
+
+// shouldTrip reports whether a Closed circuit should open: either streak
+// consecutive errors reach Config.ConsecutiveFailures, or the outcome window
+// holds at least MinRequests outcomes and its failure rate reaches thetaT.
+func (cb *CircuitBreaker) shouldTrip(outcomes int, failureRate, thetaT float64, streak int64) bool {
+	if cb.cfg.ConsecutiveFailures > 0 && streak >= int64(cb.cfg.ConsecutiveFailures) {
+		return true
+	}
+	return outcomes >= cb.cfg.MinRequests && failureRate >= thetaT
 }
 
 // handleTransition moves the outcome window to the new generation, resets
@@ -266,6 +297,7 @@ func (cb *CircuitBreaker) handleTransition(from, to State) {
 	}
 	atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 	atomic.StoreInt64(&cb.consecutiveFailures, 0)
+	atomic.StoreInt64(&cb.consecutiveErrors, 0)
 	if cb.onStateChange != nil {
 		cb.onStateChange(cb.name, from, to)
 	}
