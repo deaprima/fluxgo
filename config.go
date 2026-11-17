@@ -110,10 +110,6 @@ type Config struct {
 	// against the recent rolling percentile or the healthy baseline.
 	// Default: SlowRefBaseline. The zero value is SlowRefRecent.
 	SlowRequestReference SlowRequestReference
-
-	// RandomSeed is an optional seed for reproducible testbed runs.
-	// It is not used by the core library.
-	RandomSeed int64
 }
 
 // DefaultConfig returns a Config with sensible starting-point values for
@@ -137,7 +133,6 @@ func DefaultConfig() Config {
 		HalfOpenMaxRequests:  1,
 		SlowRequestMargin:    3.0,
 		SlowRequestReference: SlowRefBaseline,
-		RandomSeed:           0,
 	}
 }
 

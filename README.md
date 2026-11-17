@@ -60,7 +60,6 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
 | `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
-| `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
 
 > **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
 > samples is the second largest value, which is statistically unstable. Use a

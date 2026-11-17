@@ -40,10 +40,12 @@
 - `Counts` saturates at `math.MaxUint32` instead of wrapping around.
 
 ### Breaking changes
-Code that only uses `CircuitBreaker` is not affected. These exported component
-methods changed:
-- `BaselineEstimator.Observe` now takes `outcomes` and `samples` arguments.
-- `StateMachine.AllowRequest` now returns a transition instead of a `bool`.
+- `Config.RandomSeed` is removed. The library never used it; seed the testbed
+  or load generator instead.
+- These exported component methods changed. Code that only uses
+  `CircuitBreaker` is not affected by them:
+  - `BaselineEstimator.Observe` now takes `outcomes` and `samples` arguments.
+  - `StateMachine.AllowRequest` now returns a transition instead of a `bool`.
 
 ## v0.2.2 - 2026-10-12
 - `RollingPercentile.Update` uses in-place insertion: O(n), zero allocations.
