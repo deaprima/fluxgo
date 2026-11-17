@@ -131,6 +131,24 @@ func TestDefaultConfig_HalfOpenMaxRequests(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_ConsecutiveFailures(t *testing.T) {
+	if got := DefaultConfig().ConsecutiveFailures; got != 5 {
+		t.Errorf("DefaultConfig().ConsecutiveFailures = %d, want 5", got)
+	}
+}
+
+func TestValidateConsecutiveFailures(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConsecutiveFailures = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("ConsecutiveFailures = 0 (disabled): unexpected error %v", err)
+	}
+	cfg.ConsecutiveFailures = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for ConsecutiveFailures = -1, got nil")
+	}
+}
+
 func TestValidateRejectsHalfOpenMaxRequestsBelowOne(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.HalfOpenMaxRequests = 0
@@ -189,8 +207,11 @@ func TestValidateRejectsNaN(t *testing.T) {
 }
 
 func TestDefaultConfig_SlowRequestReference(t *testing.T) {
-	if got := DefaultConfig().SlowRequestReference; got != SlowRefRecent {
-		t.Errorf("DefaultConfig().SlowRequestReference = %v, want SlowRefRecent", got)
+	if got := DefaultConfig().SlowRequestReference; got != SlowRefBaseline {
+		t.Errorf("DefaultConfig().SlowRequestReference = %v, want SlowRefBaseline", got)
+	}
+	if got := DefaultConfig().SlowRequestMargin; got != 3.0 {
+		t.Errorf("DefaultConfig().SlowRequestMargin = %v, want 3.0", got)
 	}
 }
 

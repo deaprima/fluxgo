@@ -56,10 +56,10 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `RecoveryTimeout` | `60s` | Time Open before transitioning to Half-Open |
 | `MinDwellTime` | `5s` | Minimum time after a transition before the circuit can trip to Open (anti-flapping) |
 | `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
+| `ConsecutiveFailures` | `5` | Errors in a row that open the circuit regardless of the failure rate; slow requests do not count. 0 disables it. See [Consecutive Failures](#consecutive-failures). |
 | `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
-| `SlowRequestMargin` | `2.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
-| `SlowRequestReference` | `SlowRefRecent` | Reference for slow request classification: `SlowRefRecent` (current Pt) or `SlowRefBaseline` (healthy Pbase once a valid baseline is captured). See [Slow Request Classification](#slow-request-classification). |
-| `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
+| `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
+| `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
 
 > **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
 > samples is the second largest value, which is statistically unstable. Use a
@@ -78,6 +78,30 @@ When latency doubles (`Dt = 2`), `theta_t` halves — the circuit trips at half
 the failure rate compared to a static threshold. When latency improves
 (`Dt < 1`), `theta_t` rises — the circuit becomes more tolerant.
 
+A Closed circuit opens when either rule is met (subject to `MinDwellTime`):
+
+- the outcome window holds at least `MinRequests` outcomes and its failure
+  rate reaches `theta_t`, or
+- `ConsecutiveFailures` requests in a row have failed.
+
+## Consecutive Failures
+
+The failure rate is computed over a window of `WindowSize` outcomes. After a
+long healthy period, a total failure must fill a large part of that window
+before the rate reaches `theta_t`: with the defaults, about 60 failed requests.
+Failed requests do not feed the latency signals, so `theta_t` does not drop to
+help. `ConsecutiveFailures` (default 5) opens the circuit after that many errors
+in a row, so a total failure is detected as fast as by gobreaker.
+
+Only requests that `IsSuccessful` reports as failed count. Requests classified
+as slow count toward the failure rate but not toward this rule, so a burst of
+slow requests during a traffic spike cannot open the circuit through it. The
+run restarts after any success and on every state transition.
+
+The rule matches a gobreaker `ReadyToTrip` that returns true at
+`ConsecutiveFailures >= 5`. gobreaker's default `ReadyToTrip` trips at more
+than 5 consecutive failures, which is `ConsecutiveFailures = 6`.
+
 ## Warmup Period
 
 Warm-up starts at the first request (not at construction) and lasts at least
@@ -85,9 +109,9 @@ Warm-up starts at the first request (not at construction) and lasts at least
 window holds `WindowSize` latency samples, so the baseline is never taken from
 a handful of requests; under low traffic, warm-up can therefore last longer
 than `WarmupDuration`. During warm-up, the circuit trips on the static `ThetaBase` threshold, preventing
-false trips on cold-start traffic. This is comparable to gobreaker with a custom
-`ReadyToTrip` at a 0.6 failure ratio over at least `MinRequests` requests, not to
-gobreaker's default (more than 5 consecutive failures).
+false trips on cold-start traffic, or on `ConsecutiveFailures`. This is comparable to gobreaker with a custom
+`ReadyToTrip` that trips at 5 consecutive failures or at a 0.6 failure ratio over
+at least `MinRequests` requests.
 
 A baseline is captured as valid only when the circuit is Closed, the outcome
 window holds at least `MinRequests` outcomes, and the failure rate is below
@@ -131,12 +155,13 @@ just like their outcomes.
 ## Slow Request Classification
 
 Beyond explicit errors, fluxgo classifies a successful request as **degraded** if
-its latency exceeds the reference × `SlowRequestMargin` (by default, P95 × 2.0).
-A degraded request is counted as a failure in the internal failure rate.
+its latency exceeds the reference × `SlowRequestMargin` (by default, the
+healthy-state P95 × 3.0). A degraded request is counted as a failure in the
+internal failure rate.
 
 ```
-latency > P95 × 2.0  →  treated as failure internally
-                          result/error returned to caller is unchanged
+latency > Pbase × 3.0  →  treated as failure internally
+                           result/error returned to caller is unchanged
 ```
 
 **Rules:**
@@ -149,8 +174,8 @@ latency > P95 × 2.0  →  treated as failure internally
 
 | Mode | Reference | Behavior |
 |---|---|---|
-| `SlowRefRecent` (default) | `Pt × SlowRequestMargin` | Tolerant of traffic spikes, but the reference rises with the latency, so a degradation without errors never trips the circuit |
-| `SlowRefBaseline` | `Pbase × SlowRequestMargin` | Detects gradual degradation; sustained spikes above the margin are also classified as slow |
+| `SlowRefBaseline` (default) | `Pbase × SlowRequestMargin` | Detects gradual degradation; sustained spikes above the margin are also classified as slow |
+| `SlowRefRecent` | `Pt × SlowRequestMargin` | Tolerant of gradual change, but the reference rises with the latency, so a degradation without errors never trips the circuit |
 
 `SlowRefBaseline` uses the baseline only once a valid one has been captured;
 during warm-up and while only a fallback baseline exists, it behaves like
@@ -160,6 +185,19 @@ during warm-up and while only a fallback baseline exists, it behaves like
 > Rising latency on its own only lowers the threshold `theta_t`; with
 > `SlowRefRecent`, a downstream that becomes slower without returning errors
 > keeps the circuit closed.
+
+**Limitations:**
+
+- The baseline is captured once and never recaptured. With `SlowRefBaseline`,
+  a downstream that becomes permanently slower than `Pbase × SlowRequestMargin`
+  (for example, after a deployment) keeps its requests classified as slow and
+  can keep the circuit tripping. Raise `SlowRequestMargin` or create a new
+  `CircuitBreaker` if the healthy latency changes.
+- A slow request counts as a failure and also raises `Dt`, which lowers
+  `theta_t`. A burst of slow requests therefore trips the circuit sooner than
+  the same number of errors: when latency is N times the baseline, slow
+  requests making up about `ThetaBase / N` of the window are enough
+  (about 18 of 100 at 3.5x).
 
 ## Ignoring Errors
 
@@ -209,16 +247,15 @@ dashboard tooling. All fields are read under their respective component locks.
 
 where `n = Config.WindowSize` (default 100).
 
-Benchmark on Intel Core i5-11300H @ 3.10GHz (Windows, Go 1.26, 8 threads), all
-with 0 allocations. Run `make bench` and `make bench-compare` to reproduce;
+Benchmark on Apple M4 (macOS, Go 1.27, 10 threads), all with 0 allocations. Run `make bench` and `make bench-compare` to reproduce;
 absolute numbers vary by machine and load.
 
 | Benchmark | fluxgo | gobreaker v1.0.0 |
 |---|---|---|
-| `Execute()` Closed, serial | ~330 ns | ~40 ns |
-| `Execute()` Closed, parallel | ~630 ns | ~120 ns |
-| `Execute()` Open (fast reject) | ~58 ns | ~59 ns |
-| `RollingPercentile.Update()` | ~46 ns | — |
+| `Execute()` Closed, serial | ~160 ns | ~70 ns |
+| `Execute()` Closed, parallel | ~290 ns | ~250 ns |
+| `Execute()` Open (fast reject) | ~120 ns | ~120 ns |
+| `RollingPercentile.Update()` | ~22 ns | — |
 
 ## API Compatibility with gobreaker
 
@@ -237,7 +274,7 @@ differs, and the trip decision is the adaptive threshold rather than a callback.
 | `Settings.IsSuccessful` | `Settings.IsSuccessful` | Same semantics; nil counts only nil errors as success |
 | `Settings.MaxRequests` | `Config.HalfOpenMaxRequests` | Same role |
 | `Settings.Timeout` | `Config.RecoveryTimeout` | Same role |
-| `Settings.ReadyToTrip` | — | Replaced by the adaptive threshold |
+| `Settings.ReadyToTrip` | — | Replaced by the adaptive threshold and `Config.ConsecutiveFailures` |
 | `Settings.Interval` | — | The outcome window is count-based |
 | `cb.Name()`, `TwoStepCircuitBreaker` | — | Not provided |
 | `ErrOpenState` | `ErrOpenState` | Same sentinel error |

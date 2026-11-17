@@ -3,6 +3,12 @@
 ## v0.3.0 - Unreleased
 
 ### Changed
+- By default, a successful request is classified as slow when its latency
+  exceeds the healthy baseline P95 × 3.0 (`SlowRefBaseline`,
+  `SlowRequestMargin` 3.0), instead of the current P95 × 2.0. With the current
+  P95 as reference, a downstream that slowed down without returning errors
+  never opened the circuit. Set `SlowRequestReference` to `SlowRefRecent` and
+  `SlowRequestMargin` to 2.0 for the previous behavior.
 - A baseline is captured only once the rolling window is full, and a valid
   capture also needs `MinRequests` outcomes. Warm-up can therefore last longer
   than `WarmupDuration` under low traffic.
@@ -14,6 +20,11 @@
 - The minimum Go version is lowered from 1.26.4 to 1.21.
 
 ### Added
+- `Config.ConsecutiveFailures` (default 5): a Closed circuit opens after that
+  many errors in a row, regardless of the failure rate and `MinRequests`. Slow
+  requests do not count. Before, a total failure after a healthy period needed
+  about 60 failed requests to fill the outcome window. Set it to 0 for the
+  previous behavior.
 - `Config.SlowRequestReference`: classify slow requests against the recent
   percentile (`SlowRefRecent`, default) or the healthy baseline (`SlowRefBaseline`).
 - `Settings.IsSuccessful`, with the same semantics as gobreaker.
@@ -29,10 +40,12 @@
 - `Counts` saturates at `math.MaxUint32` instead of wrapping around.
 
 ### Breaking changes
-Code that only uses `CircuitBreaker` is not affected. These exported component
-methods changed:
-- `BaselineEstimator.Observe` now takes `outcomes` and `samples` arguments.
-- `StateMachine.AllowRequest` now returns a transition instead of a `bool`.
+- `Config.RandomSeed` is removed. The library never used it; seed the testbed
+  or load generator instead.
+- These exported component methods changed. Code that only uses
+  `CircuitBreaker` is not affected by them:
+  - `BaselineEstimator.Observe` now takes `outcomes` and `samples` arguments.
+  - `StateMachine.AllowRequest` now returns a transition instead of a `bool`.
 
 ## v0.2.2 - 2026-10-12
 - `RollingPercentile.Update` uses in-place insertion: O(n), zero allocations.

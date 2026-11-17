@@ -19,15 +19,18 @@ type SlowRequestReference int
 const (
 	// SlowRefRecent compares a request with the current rolling percentile
 	// (Pt × SlowRequestMargin). It detects sudden latency spikes relative to
-	// recent traffic, but follows a gradual degradation without flagging it.
-	// This is the default.
+	// recent traffic, but follows a gradual degradation without flagging it,
+	// so a downstream that slows down without returning errors never opens
+	// the circuit.
 	SlowRefRecent SlowRequestReference = iota
 
 	// SlowRefBaseline compares a request with the healthy-state percentile
 	// baseline (Pbase × SlowRequestMargin) once a valid baseline has been
 	// captured, and behaves like SlowRefRecent until then. It also detects
 	// gradual degradation, at the cost of classifying sustained traffic
-	// spikes above the margin as slow.
+	// spikes above the margin as slow. The baseline is never recaptured, so
+	// a downstream that becomes permanently slower than the margin allows
+	// keeps being classified as slow. This is the default.
 	SlowRefBaseline
 )
 
@@ -84,6 +87,14 @@ type Config struct {
 	// between 1 and WindowSize. Default: 20.
 	MinRequests int
 
+	// ConsecutiveFailures opens the circuit from Closed once this many
+	// requests in a row have failed, regardless of the failure rate and
+	// MinRequests. Only requests that IsSuccessful reports as failed count;
+	// requests classified as slow do not, so a latency spike cannot trip the
+	// circuit this way. MinDwellTime still applies. 0 disables the rule.
+	// Default: 5.
+	ConsecutiveFailures int
+
 	// HalfOpenMaxRequests is the number of probe requests allowed through
 	// while the circuit is Half-Open. Further requests are rejected with
 	// ErrTooManyRequests. The circuit closes once this many probes succeed
@@ -92,17 +103,13 @@ type Config struct {
 
 	// SlowRequestMargin is the multiplier applied to the latency selected by
 	// SlowRequestReference to classify a request as degraded.
-	// Must be greater than zero. Default: 2.0.
+	// Must be greater than zero. Default: 3.0.
 	SlowRequestMargin float64
 
 	// SlowRequestReference selects whether slow requests are classified
 	// against the recent rolling percentile or the healthy baseline.
-	// Default: SlowRefRecent.
+	// Default: SlowRefBaseline. The zero value is SlowRefRecent.
 	SlowRequestReference SlowRequestReference
-
-	// RandomSeed is an optional seed for reproducible testbed runs.
-	// It is not used by the core library.
-	RandomSeed int64
 }
 
 // DefaultConfig returns a Config with sensible starting-point values for
@@ -122,10 +129,10 @@ func DefaultConfig() Config {
 		RecoveryTimeout:      60 * time.Second,
 		MinDwellTime:         5 * time.Second,
 		MinRequests:          20,
+		ConsecutiveFailures:  5,
 		HalfOpenMaxRequests:  1,
-		SlowRequestMargin:    2.0,
-		SlowRequestReference: SlowRefRecent,
-		RandomSeed:           0,
+		SlowRequestMargin:    3.0,
+		SlowRequestReference: SlowRefBaseline,
 	}
 }
 
@@ -169,6 +176,9 @@ func (c Config) Validate() error {
 	}
 	if c.MinDwellTime < 0 {
 		return errors.New("min dwell time must be non-negative")
+	}
+	if c.ConsecutiveFailures < 0 {
+		return errors.New("consecutive failures must be non-negative")
 	}
 	if c.HalfOpenMaxRequests < 1 {
 		return errors.New("half-open max requests must be at least 1")

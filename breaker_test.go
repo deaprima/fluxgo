@@ -401,6 +401,7 @@ func TestCircuitBreaker_MinRequestsPreventsEarlyTrip(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.WarmupDuration = 0
 	cfg.MinDwellTime = 0
+	cfg.ConsecutiveFailures = 0 // test the failure-rate rule on its own
 	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
 	fail := func() (interface{}, error) { return nil, errors.New("downstream failure") }
 
@@ -414,6 +415,100 @@ func TestCircuitBreaker_MinRequestsPreventsEarlyTrip(t *testing.T) {
 	cb.Execute(fail)
 	if cb.State() != StateOpen {
 		t.Fatal("expected the circuit to open once MinRequests is reached")
+	}
+}
+
+func TestCircuitBreaker_ConsecutiveFailuresTripsBelowMinRequests(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	fail := func() (interface{}, error) { return nil, errDownstream }
+
+	for i := 0; i < cfg.ConsecutiveFailures-1; i++ {
+		cb.Execute(fail)
+	}
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v after %d errors, want Closed", cb.State(), cfg.ConsecutiveFailures-1)
+	}
+
+	cb.Execute(fail)
+	if cb.State() != StateOpen {
+		t.Fatalf("State() = %v after %d consecutive errors, want Open", cb.State(), cfg.ConsecutiveFailures)
+	}
+}
+
+func TestCircuitBreaker_ConsecutiveFailuresResetBySuccess(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	fail := func() (interface{}, error) { return nil, errDownstream }
+
+	for round := 0; round < 3; round++ {
+		for i := 0; i < cfg.ConsecutiveFailures-1; i++ {
+			cb.Execute(fail)
+		}
+		cb.Execute(func() (interface{}, error) { return nil, nil })
+	}
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed: no run reached %d errors", cb.State(), cfg.ConsecutiveFailures)
+	}
+}
+
+func TestCircuitBreaker_ConsecutiveFailuresIgnoreSlowRequests(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cb := newWarmedUpBreakerWithConfig(t, cfg)
+
+	// 10ms * 2.0 margin = 20ms threshold; 100ms requests are slow but
+	// successful, so they count toward the failure rate but not the streak.
+	for i := 0; i < cfg.ConsecutiveFailures; i++ {
+		executeWithLatency(cb, 100*time.Millisecond, true)
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed: slow requests must not trip the streak rule", cb.State())
+	}
+	if got := cb.Counts().ConsecutiveFailures; got != uint32(cfg.ConsecutiveFailures) {
+		t.Errorf("Counts().ConsecutiveFailures = %d, want %d slow requests", got, cfg.ConsecutiveFailures)
+	}
+}
+
+func TestCircuitBreaker_ConsecutiveFailuresRespectMinDwellTime(t *testing.T) {
+	cfg := DefaultConfig()
+	clock := newFakeClock()
+	cb := newCircuitBreakerWithClock(Settings{Name: "test", Config: cfg}, clock.Now)
+
+	for i := 0; i < 2*cfg.ConsecutiveFailures; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, false)
+	}
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v within MinDwellTime, want Closed", cb.State())
+	}
+
+	clock.Advance(cfg.MinDwellTime)
+	executeWithLatency(cb, 10*time.Millisecond, false)
+	if cb.State() != StateOpen {
+		t.Fatalf("State() = %v once MinDwellTime elapsed, want Open", cb.State())
+	}
+}
+
+func TestCircuitBreaker_ErrorStreakIgnoresStaleGeneration(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cb := NewCircuitBreaker(Settings{Name: "test", Config: cfg})
+	stale := cb.machine.Generation()
+	for i := 0; i < cfg.ConsecutiveFailures; i++ {
+		cb.Execute(func() (interface{}, error) { return nil, errDownstream })
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("State() = %v, want Open", cb.State())
+	}
+
+	if got := cb.recordErrorStreak(stale, false); got != 0 {
+		t.Errorf("recordErrorStreak(stale) = %d, want 0", got)
+	}
+	if got := atomic.LoadInt64(&cb.consecutiveErrors); got != 0 {
+		t.Errorf("consecutiveErrors = %d, want 0 after a stale result", got)
 	}
 }
 
@@ -703,6 +798,7 @@ func rampLatency(cb *CircuitBreaker) time.Duration {
 func TestCircuitBreaker_SlowRefRecent_MissesGradualDegradation(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinDwellTime = 0
+	cfg.SlowRequestReference = SlowRefRecent
 	cb := newWarmedUpBreakerWithConfig(t, cfg)
 
 	if latency := rampLatency(cb); latency != 0 {
@@ -735,9 +831,13 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	cfg.SlowRequestReference = SlowRefBaseline
 	cb := newWarmedUpBreakerWithConfig(t, cfg)
 
-	// A 2.5x spike shorter than MinRequests requests, then back to normal.
-	for i := 0; i < cfg.MinRequests-1; i++ {
-		executeWithLatency(cb, 25*time.Millisecond, true)
+	// A 3.5x spike, above the default 3.0 margin, over 10 requests, then back
+	// to normal. The spike raises Dt to about 3.5, lowering theta_t to about
+	// 0.17, above the 0.10 failure rate of the slow requests. A spike over 18
+	// or more of the 100 requests in the window would trip the circuit.
+	const spike = 10
+	for i := 0; i < spike; i++ {
+		executeWithLatency(cb, 35*time.Millisecond, true)
 	}
 	for i := 0; i < cfg.WindowSize; i++ {
 		executeWithLatency(cb, 10*time.Millisecond, true)
@@ -746,7 +846,7 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	if cb.State() != StateClosed {
 		t.Fatalf("expected a short spike not to trip the circuit, got %v", cb.State())
 	}
-	if got := cb.collector.DegradedRequests(); got != int64(cfg.MinRequests-1) {
+	if got := cb.collector.DegradedRequests(); got != spike {
 		t.Errorf("expected every spike request to be classified as slow, got %d", got)
 	}
 }

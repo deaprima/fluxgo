@@ -145,9 +145,20 @@ func (sm *StateMachine) AllowRequest() (generation uint64, change transition, er
 // MinDwellTime has elapsed since the last transition. It reports whether the
 // transition occurred.
 func (sm *StateMachine) EvaluateClosed(generation uint64, failureRate, thetaT float64) bool {
+	if failureRate < thetaT {
+		return false
+	}
+	return sm.tripClosed(generation)
+}
+
+// tripClosed transitions the circuit from Closed to Open when the result
+// belongs to the current generation and MinDwellTime has elapsed since the
+// last transition. The caller decides whether a trip condition is met. It
+// reports whether the transition occurred.
+func (sm *StateMachine) tripClosed(generation uint64) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state != StateClosed || generation != sm.generation || failureRate < thetaT {
+	if sm.state != StateClosed || generation != sm.generation {
 		return false
 	}
 	if sm.now().Sub(sm.lastTransition) < sm.cfg.MinDwellTime {
