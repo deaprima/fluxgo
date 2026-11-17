@@ -139,6 +139,13 @@ func tbGradualDegradation(t time.Duration, rng *rand.Rand) (time.Duration, bool,
 // 10 VUs for 60s, a ramp to 250 VUs over 10s, and a 60s peak during which a
 // bandwidth toxic multiplies latency by factor and errorRate of the requests
 // fail. The testbed requires the downstream success rate to stay above 95%.
+//
+// In the testbed run of 2026-11-17, the 150 KB/s toxic (a limit per
+// connection) raised the P95 on the auth->user link only from 21.4ms to
+// about 22.9ms (x1.07), with no errors.
+const tbMeasuredSpikeFactor = 1.07
+
+// tbTrafficSpike returns the request stream of the traffic spike scenario.
 func tbTrafficSpike(factor, errorRate float64) tbRequest {
 	return func(t time.Duration, rng *rand.Rand) (time.Duration, bool, int, bool) {
 		const healthy, ramp, peak = 60 * time.Second, 10 * time.Second, 60 * time.Second
@@ -181,16 +188,21 @@ func withSlowRef(ref SlowRequestReference, margin float64) Config {
 func TestTestbedScenario_GradualDegradation(t *testing.T) {
 	const faultStart = 30 * time.Second
 
-	recent := runTestbedScenario(withSlowRef(SlowRefRecent, 2), faultStart, tbGradualDegradation)
-	t.Logf("SlowRefRecent:   %v", recent)
-	baseline := runTestbedScenario(withSlowRef(SlowRefBaseline, 2), faultStart, tbGradualDegradation)
-	t.Logf("SlowRefBaseline: %v", baseline)
+	def := runTestbedScenario(DefaultConfig(), faultStart, tbGradualDegradation)
+	t.Logf("default (SlowRefBaseline x3): %v", def)
+	recent := runTestbedScenario(withSlowRef(SlowRefRecent, 3), faultStart, tbGradualDegradation)
+	t.Logf("SlowRefRecent x3:             %v", recent)
 
-	// Without errors, gobreaker has nothing to count, and with SlowRefRecent
-	// the slow-request reference rises with the latency.
-	if recent.gobreaker >= 0 {
-		t.Errorf("gobreaker opened at %v, want never: the scenario has no errors", recent.gobreaker)
+	// Without errors, gobreaker has nothing to count.
+	if def.gobreaker >= 0 {
+		t.Errorf("gobreaker opened at %v, want never: the scenario has no errors", def.gobreaker)
 	}
+	// The first step (+50ms on a 10-20ms downstream) already exceeds three
+	// times the healthy P95.
+	if def.fluxgo < 0 || def.fluxgo > 25*time.Second {
+		t.Errorf("default opened at %s, want within the first 25s step", fmtOpen(def.fluxgo))
+	}
+	// With SlowRefRecent the slow-request reference rises with the latency.
 	if recent.fluxgo >= 0 {
 		t.Errorf("SlowRefRecent opened at %v, want never", recent.fluxgo)
 	}
@@ -198,10 +210,21 @@ func TestTestbedScenario_GradualDegradation(t *testing.T) {
 
 func TestTestbedScenario_TrafficSpike(t *testing.T) {
 	const faultStart = 70 * time.Second
-	for _, factor := range []float64{1.5, 2, 3, 5, 10} {
+
+	// The measured spike, and a margin above it, must not trip the default.
+	for _, factor := range []float64{tbMeasuredSpikeFactor, 1.5} {
+		res := runTestbedScenario(DefaultConfig(), faultStart, tbTrafficSpike(factor, 0.03))
+		t.Logf("default, latency x%-4v %v", factor, res)
+		if res.fluxgo >= 0 || res.gobreaker >= 0 {
+			t.Errorf("latency x%v: %v, want no trip during a healthy spike", factor, res)
+		}
+	}
+
+	// Larger spikes than the testbed produces, for reference.
+	for _, factor := range []float64{2, 3, 5, 10} {
 		for _, ref := range []SlowRequestReference{SlowRefRecent, SlowRefBaseline} {
-			res := runTestbedScenario(withSlowRef(ref, 2), faultStart, tbTrafficSpike(factor, 0.03))
-			t.Logf("latency x%-4v %-15v %v", factor, slowRefName(ref), res)
+			res := runTestbedScenario(withSlowRef(ref, 3), faultStart, tbTrafficSpike(factor, 0.03))
+			t.Logf("latency x%-4v %-15v x3 %v", factor, slowRefName(ref), res)
 		}
 	}
 }

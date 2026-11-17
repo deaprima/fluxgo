@@ -207,8 +207,11 @@ func TestValidateRejectsNaN(t *testing.T) {
 }
 
 func TestDefaultConfig_SlowRequestReference(t *testing.T) {
-	if got := DefaultConfig().SlowRequestReference; got != SlowRefRecent {
-		t.Errorf("DefaultConfig().SlowRequestReference = %v, want SlowRefRecent", got)
+	if got := DefaultConfig().SlowRequestReference; got != SlowRefBaseline {
+		t.Errorf("DefaultConfig().SlowRequestReference = %v, want SlowRefBaseline", got)
+	}
+	if got := DefaultConfig().SlowRequestMargin; got != 3.0 {
+		t.Errorf("DefaultConfig().SlowRequestMargin = %v, want 3.0", got)
 	}
 }
 

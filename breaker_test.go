@@ -798,6 +798,7 @@ func rampLatency(cb *CircuitBreaker) time.Duration {
 func TestCircuitBreaker_SlowRefRecent_MissesGradualDegradation(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinDwellTime = 0
+	cfg.SlowRequestReference = SlowRefRecent
 	cb := newWarmedUpBreakerWithConfig(t, cfg)
 
 	if latency := rampLatency(cb); latency != 0 {
@@ -830,9 +831,13 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	cfg.SlowRequestReference = SlowRefBaseline
 	cb := newWarmedUpBreakerWithConfig(t, cfg)
 
-	// A 2.5x spike shorter than MinRequests requests, then back to normal.
-	for i := 0; i < cfg.MinRequests-1; i++ {
-		executeWithLatency(cb, 25*time.Millisecond, true)
+	// A 3.5x spike, above the default 3.0 margin, over 10 requests, then back
+	// to normal. The spike raises Dt to about 3.5, lowering theta_t to about
+	// 0.17, above the 0.10 failure rate of the slow requests. A spike over 18
+	// or more of the 100 requests in the window would trip the circuit.
+	const spike = 10
+	for i := 0; i < spike; i++ {
+		executeWithLatency(cb, 35*time.Millisecond, true)
 	}
 	for i := 0; i < cfg.WindowSize; i++ {
 		executeWithLatency(cb, 10*time.Millisecond, true)
@@ -841,7 +846,7 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	if cb.State() != StateClosed {
 		t.Fatalf("expected a short spike not to trip the circuit, got %v", cb.State())
 	}
-	if got := cb.collector.DegradedRequests(); got != int64(cfg.MinRequests-1) {
+	if got := cb.collector.DegradedRequests(); got != spike {
 		t.Errorf("expected every spike request to be classified as slow, got %d", got)
 	}
 }

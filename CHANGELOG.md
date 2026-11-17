@@ -3,6 +3,12 @@
 ## v0.3.0 - Unreleased
 
 ### Changed
+- By default, a successful request is classified as slow when its latency
+  exceeds the healthy baseline P95 × 3.0 (`SlowRefBaseline`,
+  `SlowRequestMargin` 3.0), instead of the current P95 × 2.0. With the current
+  P95 as reference, a downstream that slowed down without returning errors
+  never opened the circuit. Set `SlowRequestReference` to `SlowRefRecent` and
+  `SlowRequestMargin` to 2.0 for the previous behavior.
 - A baseline is captured only once the rolling window is full, and a valid
   capture also needs `MinRequests` outcomes. Warm-up can therefore last longer
   than `WarmupDuration` under low traffic.

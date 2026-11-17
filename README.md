@@ -58,8 +58,8 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
 | `ConsecutiveFailures` | `5` | Errors in a row that open the circuit regardless of the failure rate; slow requests do not count. 0 disables it. See [Consecutive Failures](#consecutive-failures). |
 | `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
-| `SlowRequestMargin` | `2.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
-| `SlowRequestReference` | `SlowRefRecent` | Reference for slow request classification: `SlowRefRecent` (current Pt) or `SlowRefBaseline` (healthy Pbase once a valid baseline is captured). See [Slow Request Classification](#slow-request-classification). |
+| `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
+| `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
 | `RandomSeed` | `0` | Optional seed for reproducible testbed runs |
 
 > **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
@@ -156,12 +156,13 @@ just like their outcomes.
 ## Slow Request Classification
 
 Beyond explicit errors, fluxgo classifies a successful request as **degraded** if
-its latency exceeds the reference × `SlowRequestMargin` (by default, P95 × 2.0).
-A degraded request is counted as a failure in the internal failure rate.
+its latency exceeds the reference × `SlowRequestMargin` (by default, the
+healthy-state P95 × 3.0). A degraded request is counted as a failure in the
+internal failure rate.
 
 ```
-latency > P95 × 2.0  →  treated as failure internally
-                          result/error returned to caller is unchanged
+latency > Pbase × 3.0  →  treated as failure internally
+                           result/error returned to caller is unchanged
 ```
 
 **Rules:**
@@ -174,8 +175,8 @@ latency > P95 × 2.0  →  treated as failure internally
 
 | Mode | Reference | Behavior |
 |---|---|---|
-| `SlowRefRecent` (default) | `Pt × SlowRequestMargin` | Tolerant of traffic spikes, but the reference rises with the latency, so a degradation without errors never trips the circuit |
-| `SlowRefBaseline` | `Pbase × SlowRequestMargin` | Detects gradual degradation; sustained spikes above the margin are also classified as slow |
+| `SlowRefBaseline` (default) | `Pbase × SlowRequestMargin` | Detects gradual degradation; sustained spikes above the margin are also classified as slow |
+| `SlowRefRecent` | `Pt × SlowRequestMargin` | Tolerant of gradual change, but the reference rises with the latency, so a degradation without errors never trips the circuit |
 
 `SlowRefBaseline` uses the baseline only once a valid one has been captured;
 during warm-up and while only a fallback baseline exists, it behaves like
@@ -185,6 +186,19 @@ during warm-up and while only a fallback baseline exists, it behaves like
 > Rising latency on its own only lowers the threshold `theta_t`; with
 > `SlowRefRecent`, a downstream that becomes slower without returning errors
 > keeps the circuit closed.
+
+**Limitations:**
+
+- The baseline is captured once and never recaptured. With `SlowRefBaseline`,
+  a downstream that becomes permanently slower than `Pbase × SlowRequestMargin`
+  (for example, after a deployment) keeps its requests classified as slow and
+  can keep the circuit tripping. Raise `SlowRequestMargin` or create a new
+  `CircuitBreaker` if the healthy latency changes.
+- A slow request counts as a failure and also raises `Dt`, which lowers
+  `theta_t`. A burst of slow requests therefore trips the circuit sooner than
+  the same number of errors: when latency is N times the baseline, slow
+  requests making up about `ThetaBase / N` of the window are enough
+  (about 18 of 100 at 3.5x).
 
 ## Ignoring Errors
 

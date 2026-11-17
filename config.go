@@ -19,15 +19,18 @@ type SlowRequestReference int
 const (
 	// SlowRefRecent compares a request with the current rolling percentile
 	// (Pt × SlowRequestMargin). It detects sudden latency spikes relative to
-	// recent traffic, but follows a gradual degradation without flagging it.
-	// This is the default.
+	// recent traffic, but follows a gradual degradation without flagging it,
+	// so a downstream that slows down without returning errors never opens
+	// the circuit.
 	SlowRefRecent SlowRequestReference = iota
 
 	// SlowRefBaseline compares a request with the healthy-state percentile
 	// baseline (Pbase × SlowRequestMargin) once a valid baseline has been
 	// captured, and behaves like SlowRefRecent until then. It also detects
 	// gradual degradation, at the cost of classifying sustained traffic
-	// spikes above the margin as slow.
+	// spikes above the margin as slow. The baseline is never recaptured, so
+	// a downstream that becomes permanently slower than the margin allows
+	// keeps being classified as slow. This is the default.
 	SlowRefBaseline
 )
 
@@ -100,12 +103,12 @@ type Config struct {
 
 	// SlowRequestMargin is the multiplier applied to the latency selected by
 	// SlowRequestReference to classify a request as degraded.
-	// Must be greater than zero. Default: 2.0.
+	// Must be greater than zero. Default: 3.0.
 	SlowRequestMargin float64
 
 	// SlowRequestReference selects whether slow requests are classified
 	// against the recent rolling percentile or the healthy baseline.
-	// Default: SlowRefRecent.
+	// Default: SlowRefBaseline. The zero value is SlowRefRecent.
 	SlowRequestReference SlowRequestReference
 
 	// RandomSeed is an optional seed for reproducible testbed runs.
@@ -132,8 +135,8 @@ func DefaultConfig() Config {
 		MinRequests:          20,
 		ConsecutiveFailures:  5,
 		HalfOpenMaxRequests:  1,
-		SlowRequestMargin:    2.0,
-		SlowRequestReference: SlowRefRecent,
+		SlowRequestMargin:    3.0,
+		SlowRequestReference: SlowRefBaseline,
 		RandomSeed:           0,
 	}
 }
