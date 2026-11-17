@@ -247,16 +247,15 @@ dashboard tooling. All fields are read under their respective component locks.
 
 where `n = Config.WindowSize` (default 100).
 
-Benchmark on Intel Core i5-11300H @ 3.10GHz (Windows, Go 1.26, 8 threads), all
-with 0 allocations. Run `make bench` and `make bench-compare` to reproduce;
+Benchmark on Apple M4 (macOS, Go 1.27, 10 threads), all with 0 allocations. Run `make bench` and `make bench-compare` to reproduce;
 absolute numbers vary by machine and load.
 
 | Benchmark | fluxgo | gobreaker v1.0.0 |
 |---|---|---|
-| `Execute()` Closed, serial | ~330 ns | ~40 ns |
-| `Execute()` Closed, parallel | ~630 ns | ~120 ns |
-| `Execute()` Open (fast reject) | ~58 ns | ~59 ns |
-| `RollingPercentile.Update()` | ~46 ns | — |
+| `Execute()` Closed, serial | ~160 ns | ~70 ns |
+| `Execute()` Closed, parallel | ~290 ns | ~250 ns |
+| `Execute()` Open (fast reject) | ~120 ns | ~120 ns |
+| `RollingPercentile.Update()` | ~22 ns | — |
 
 ## API Compatibility with gobreaker
 
