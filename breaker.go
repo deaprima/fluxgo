@@ -57,7 +57,7 @@ type Snapshot struct {
 	St               float64 // current EWMA latency
 	Pt               float64 // current rolling percentile
 	Dt               float64 // degradation ratio
-	ThetaT           float64 // current adaptive threshold
+	ThetaT           float64 // current adaptive threshold, applied to the error rate
 	Sbase            float64 // healthy-state EWMA baseline
 	Pbase            float64 // healthy-state percentile baseline
 	FailureRate      float64 // current failure rate in the outcome window
@@ -293,16 +293,25 @@ func (cb *CircuitBreaker) recordErrorStreak(generation uint64, success bool) int
 	return atomic.AddInt64(&cb.consecutiveErrors, 1)
 }
 
-// shouldTrip reports whether a Closed circuit should open: either streak
-// consecutive errors reach Config.ConsecutiveFailures, or the outcome window
-// holds at least MinRequests outcomes and its failure rate reaches thetaT.
-// When the failure rate reaches thetaT only because slow requests count as
-// failures, the condition must also have held for Config.SlowTripDuration.
+// shouldTrip reports whether a Closed circuit should open. With at least
+// MinRequests outcomes in the window, either rule opens it:
+//   - the error rate reaches thetaT, the adaptive threshold, which falls as
+//     latency rises above the baseline;
+//   - the failure rate, with slow requests counted as failures, reaches the
+//     threshold at baseline latency (slowThreshold) and has done so for
+//     Config.SlowTripDuration. Slow requests already measure latency, so the
+//     rising latency does not lower this threshold a second time.
+//
+// Regardless of the window, streak consecutive errors reaching
+// Config.ConsecutiveFailures also open it.
 func (cb *CircuitBreaker) shouldTrip(outcomes int, failureRate, errorRate, thetaT float64, streak int64) bool {
 	if cb.cfg.ConsecutiveFailures > 0 && streak >= int64(cb.cfg.ConsecutiveFailures) {
 		return true
 	}
-	if outcomes < cb.cfg.MinRequests || failureRate < thetaT {
+	if outcomes >= cb.cfg.MinRequests && errorRate >= thetaT {
+		return true
+	}
+	if outcomes < cb.cfg.MinRequests || failureRate < cb.slowThreshold() {
 		// Load first: on the hot path the timer is almost always unset, and
 		// a store on every request would contend across cores.
 		if atomic.LoadInt64(&cb.slowTripSince) != noSlowTrip {
@@ -310,10 +319,17 @@ func (cb *CircuitBreaker) shouldTrip(outcomes int, failureRate, errorRate, theta
 		}
 		return false
 	}
-	if errorRate >= thetaT || cb.cfg.SlowTripDuration == 0 {
+	if cb.cfg.SlowTripDuration == 0 {
 		return true
 	}
 	return cb.slowTripSustained()
+}
+
+// slowThreshold returns the threshold that the failure rate, with slow
+// requests counted, must reach: ThetaBase clamped to [ThetaMin, ThetaMax],
+// the adaptive threshold at baseline latency.
+func (cb *CircuitBreaker) slowThreshold() float64 {
+	return clamp(cb.cfg.ThetaBase, cb.cfg.ThetaMin, cb.cfg.ThetaMax)
 }
 
 // slowTripSustained reports whether the failure rate has reached the

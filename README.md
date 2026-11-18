@@ -48,7 +48,7 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `PercentileTarget` | `95` | Latency percentile to track: 95 or 99. Not tuned in the thesis experiments; still configurable. |
 | `W1` | `0.4` | Weight of EWMA signal in degradation ratio |
 | `W2` | `0.6` | Weight of P95/P99 signal (W1 + W2 = 1) |
-| `ThetaBase` | `0.6` | Baseline failure-rate threshold |
+| `ThetaBase` | `0.6` | Baseline failure-rate threshold; also the threshold for slow requests, which latency does not lower |
 | `ThetaMin` | `0.05` | Minimum adaptive threshold (clamp floor) |
 | `ThetaMax` | `0.9` | Maximum adaptive threshold (clamp ceiling) |
 | `WarmupDuration` | `30s` | Minimum observation period before the adaptive threshold activates. 0 = no minimum. |
@@ -60,7 +60,7 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed. Probes are judged by their error only, not by their latency |
 | `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
-| `SlowTripDuration` | `1s` | How long the failure rate must stay at or above `theta_t`, over at least `WindowSize` new outcomes, when it gets there only because slow requests count as failures. 0 trips at once. See [Slow Trip Duration](#slow-trip-duration). |
+| `SlowTripDuration` | `1s` | How long the failure rate with slow requests counted must stay at or above its threshold, over at least `WindowSize` new outcomes, before the circuit opens. Errors are not delayed. 0 trips at once. See [Slow Trip Duration](#slow-trip-duration). |
 
 > **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
 > samples is the second largest value, which is statistically unstable. Use a
@@ -76,14 +76,22 @@ theta_t = clamp(ThetaBase/Dt, ThetaMin, ThetaMax)
 ```
 
 When latency doubles (`Dt = 2`), `theta_t` halves — the circuit trips at half
-the failure rate compared to a static threshold. When latency improves
+the error rate compared to a static threshold. When latency improves
 (`Dt < 1`), `theta_t` rises — the circuit becomes more tolerant.
 
-A Closed circuit opens when either rule is met (subject to `MinDwellTime`):
+`theta_t` applies to errors. Slow requests are compared with the threshold at
+baseline latency, `clamp(ThetaBase, ThetaMin, ThetaMax)`: a slow request is
+already a latency signal, and letting the same latency also lower the
+threshold would count it twice, so that a burst of slow requests during a
+traffic spike would trip the circuit at a fraction of `ThetaBase`.
 
-- the outcome window holds at least `MinRequests` outcomes and its failure
-  rate reaches `theta_t` (if it reaches `theta_t` only because slow requests
-  count as failures, it must stay there for `SlowTripDuration`), or
+A Closed circuit opens when any rule is met (subject to `MinDwellTime`):
+
+- the outcome window holds at least `MinRequests` outcomes and its error rate
+  reaches `theta_t`;
+- the outcome window holds at least `MinRequests` outcomes, its failure rate
+  (errors and slow requests) reaches `clamp(ThetaBase, ThetaMin, ThetaMax)`,
+  and it has stayed there for `SlowTripDuration`;
 - `ConsecutiveFailures` requests in a row have failed.
 
 ## Consecutive Failures
@@ -111,7 +119,7 @@ The outcome window counts requests, not time. At 5,000 requests per second, its
 throttling, a GC pause) can fill it with slow requests. Under a traffic spike,
 such stalls make a healthy downstream look degraded.
 
-When the failure rate reaches `theta_t` only because slow requests count as
+When the failure rate reaches its threshold with slow requests counted as
 failures, the circuit therefore opens only once that condition has held without
 interruption for `SlowTripDuration` (default 1s), and the window has taken in
 at least `WindowSize` new outcomes since it started. The second rule matters
@@ -119,7 +127,7 @@ under low traffic, where one burst can stay in the window for longer than
 `SlowTripDuration`. A downstream that stays slow still opens the circuit, about
 `SlowTripDuration` later than it would without the rule.
 
-Errors are not delayed: if the errors alone reach `theta_t`, or
+Errors are not delayed: if the error rate reaches `theta_t`, or
 `ConsecutiveFailures` is reached, the circuit opens at once. Set
 `SlowTripDuration` to 0 to open on slow requests as soon as the threshold is
 reached.
@@ -223,11 +231,10 @@ during warm-up and while only a fallback baseline exists, it behaves like
   (for example, after a deployment) keeps its requests classified as slow and
   can keep the circuit tripping. Raise `SlowRequestMargin` or create a new
   `CircuitBreaker` if the healthy latency changes.
-- A slow request counts as a failure and also raises `Dt`, which lowers
-  `theta_t`: when latency is N times the baseline, slow requests making up
-  about `ThetaBase / N` of the window reach the threshold (about 18 of 100 at
-  3.5x). `SlowTripDuration` keeps a short burst from tripping the circuit this
-  way, but a slowdown that lasts longer does.
+- Without errors, the circuit opens only once slow requests make up
+  `ThetaBase` of the window (60 of 100 by default), however slow they are. A
+  downstream where only a minority of requests becomes slow keeps the circuit
+  closed; with errors on top, `theta_t` still falls with the latency.
 - While a downstream stays slow without errors, each recovery lets traffic
   through for about `MinDwellTime` (plus `SlowTripDuration`) before the circuit
   opens again, because probes are judged by their error only.

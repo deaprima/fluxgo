@@ -55,7 +55,11 @@ type Config struct {
 	W2 float64
 
 	// ThetaBase is the baseline failure-rate threshold, equivalent to a static
-	// gobreaker threshold. It must be in the range (0, 1].
+	// gobreaker threshold. The adaptive threshold that the error rate is
+	// compared with is ThetaBase / Dt; the failure rate with slow requests
+	// counted is compared with ThetaBase itself, because slow requests
+	// already reflect the latency that raises Dt. It must be in the range
+	// (0, 1].
 	ThetaBase float64
 
 	// ThetaMin is the lower bound of the adaptive threshold after clamping.
@@ -114,16 +118,16 @@ type Config struct {
 	// Default: SlowRefBaseline. The zero value is SlowRefRecent.
 	SlowRequestReference SlowRequestReference
 
-	// SlowTripDuration is how long the failure rate must stay at or above
-	// the threshold before a Closed circuit opens, when the threshold is
-	// reached only because slow requests count as failures. The window must
+	// SlowTripDuration is how long the failure rate, with slow requests
+	// counted as failures, must stay at or above ThetaBase (clamped to
+	// [ThetaMin, ThetaMax]) before a Closed circuit opens. The window must
 	// also have taken in WindowSize new outcomes during that time, so a
 	// single burst of slow requests that stays in the window under low
 	// traffic cannot open the circuit. This keeps short latency bursts, such
 	// as CPU throttling under a load spike, from opening the circuit, while
-	// a downstream that stays slow still does. When errors alone reach the
-	// threshold, or ConsecutiveFailures is reached, the circuit opens at
-	// once. 0 opens the circuit as soon as the threshold is reached.
+	// a downstream that stays slow still does. When the error rate reaches
+	// the adaptive threshold, or ConsecutiveFailures is reached, the circuit
+	// opens at once. 0 opens the circuit as soon as the threshold is reached.
 	// Default: 1s.
 	SlowTripDuration time.Duration
 }

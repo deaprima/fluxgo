@@ -845,9 +845,8 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	cb := newWarmedUpBreakerWithConfig(t, cfg)
 
 	// A 3.5x spike, above the default 3.0 margin, over 10 requests, then back
-	// to normal. The spike raises Dt to about 3.5, lowering theta_t to about
-	// 0.17, above the 0.10 failure rate of the slow requests. A spike over 18
-	// or more of the 100 requests in the window would trip the circuit.
+	// to normal. The 0.10 failure rate of the slow requests stays below
+	// ThetaBase, which rising latency does not lower for slow requests.
 	const spike = 10
 	for i := 0; i < spike; i++ {
 		executeWithLatency(cb, 35*time.Millisecond, true)
@@ -917,15 +916,16 @@ func TestCircuitBreaker_SlowTrip_LowTrafficBurstDoesNotTrip(t *testing.T) {
 func TestCircuitBreaker_SlowTrip_SustainedSlownessTrips(t *testing.T) {
 	cb, clock := newSlowTripBreaker(t, time.Second)
 
-	// 200 requests per second, all slow: the threshold is reached on the
-	// first request, and the circuit opens after one second.
+	// 200 requests per second, all slow: 60 of the 100 outcomes in the
+	// window are slow after 0.3s, which reaches ThetaBase, and the circuit
+	// opens SlowTripDuration later.
 	sent := sendEvery(cb, clock, 1000, 5*time.Millisecond, 50*time.Millisecond, true)
 
 	if cb.State() != StateOpen {
 		t.Fatal("expected sustained slowness to open the circuit")
 	}
-	if elapsed := time.Duration(sent+1) * 5 * time.Millisecond; elapsed < time.Second || elapsed > 1100*time.Millisecond {
-		t.Errorf("opened after %v of slowness, want just over SlowTripDuration (1s)", elapsed)
+	if elapsed := time.Duration(sent+1) * 5 * time.Millisecond; elapsed < 1300*time.Millisecond || elapsed > 1400*time.Millisecond {
+		t.Errorf("opened after %v of slowness, want 0.3s to reach ThetaBase plus SlowTripDuration (1s)", elapsed)
 	}
 }
 
@@ -956,6 +956,44 @@ func TestCircuitBreaker_SlowTrip_ErrorsTripWithoutDelay(t *testing.T) {
 
 	if cb.State() != StateOpen {
 		t.Fatal("expected a 75% error rate to open the circuit without waiting")
+	}
+}
+
+func TestCircuitBreaker_SlowThreshold_NotLoweredByLatency(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, 0)
+
+	// 40% of requests at 5x the baseline. The latency raises Dt to about 3,
+	// so the adaptive threshold falls below 0.4, but slow requests are
+	// compared with ThetaBase (0.6).
+	for i := 0; i < 300; i++ {
+		latency := 10 * time.Millisecond
+		if i%5 < 2 {
+			latency = 50 * time.Millisecond
+		}
+		clock.Advance(5 * time.Millisecond)
+		executeWithLatency(cb, latency, true)
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed: 40%% slow requests are below ThetaBase", cb.State())
+	}
+	if theta := cb.Snapshot().ThetaT; theta >= 0.4 {
+		t.Errorf("ThetaT = %v, want below 0.4 so the scenario would have tripped on it", theta)
+	}
+}
+
+func TestCircuitBreaker_ErrorThreshold_LoweredByLatency(t *testing.T) {
+	cb, _ := newSlowTripBreaker(t, time.Second)
+
+	// 30% errors while successful requests take 5x the baseline. The error
+	// rate is below ThetaBase but above the adaptive threshold, so the
+	// circuit opens without waiting for SlowTripDuration.
+	for i := 0; i < 400 && cb.State() == StateClosed; i++ {
+		executeWithLatency(cb, 50*time.Millisecond, i%10 >= 3)
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected a 30% error rate at 5x latency to open the circuit")
 	}
 }
 
