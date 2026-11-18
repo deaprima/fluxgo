@@ -13,6 +13,27 @@ func TestOutcomeWindow_EmptyReturnsZero(t *testing.T) {
 	}
 }
 
+func TestOutcomeWindow_CountsSlowAsFailureButNotError(t *testing.T) {
+	w := NewOutcomeWindow(4)
+	w.add(0, outcomeSlow)
+	w.add(0, outcomeError)
+	w.add(0, outcomeSuccess)
+	w.add(0, outcomeSlow)
+	if fr, er, n := w.stats(); fr != 0.75 || er != 0.25 || n != 4 {
+		t.Fatalf("expected (0.75, 0.25, 4), got (%v, %v, %d)", fr, er, n)
+	}
+	// Evict the first slow request, then the error.
+	w.add(0, outcomeSuccess)
+	w.add(0, outcomeSuccess)
+	if fr, er, _ := w.stats(); fr != 0.25 || er != 0 {
+		t.Fatalf("expected (0.25, 0) after evictions, got (%v, %v)", fr, er)
+	}
+	w.Advance(1)
+	if fr, er, n := w.stats(); fr != 0 || er != 0 || n != 0 {
+		t.Fatalf("expected an empty window after Advance, got (%v, %v, %d)", fr, er, n)
+	}
+}
+
 func TestOutcomeWindow_EvictsOldestOutcome(t *testing.T) {
 	w := NewOutcomeWindow(4)
 	w.Add(0, true)

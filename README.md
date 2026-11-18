@@ -57,9 +57,10 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `MinDwellTime` | `5s` | Minimum time after a transition before the circuit can trip to Open (anti-flapping) |
 | `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
 | `ConsecutiveFailures` | `5` | Errors in a row that open the circuit regardless of the failure rate; slow requests do not count. 0 disables it. See [Consecutive Failures](#consecutive-failures). |
-| `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed |
+| `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed. Probes are judged by their error only, not by their latency |
 | `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
+| `SlowTripDuration` | `1s` | How long the failure rate must stay at or above `theta_t`, over at least `WindowSize` new outcomes, when it gets there only because slow requests count as failures. 0 trips at once. See [Slow Trip Duration](#slow-trip-duration). |
 
 > **Note:** avoid `PercentileTarget = 99` with `WindowSize = 100`. P99 of 100
 > samples is the second largest value, which is statistically unstable. Use a
@@ -81,7 +82,8 @@ the failure rate compared to a static threshold. When latency improves
 A Closed circuit opens when either rule is met (subject to `MinDwellTime`):
 
 - the outcome window holds at least `MinRequests` outcomes and its failure
-  rate reaches `theta_t`, or
+  rate reaches `theta_t` (if it reaches `theta_t` only because slow requests
+  count as failures, it must stay there for `SlowTripDuration`), or
 - `ConsecutiveFailures` requests in a row have failed.
 
 ## Consecutive Failures
@@ -101,6 +103,26 @@ run restarts after any success and on every state transition.
 The rule matches a gobreaker `ReadyToTrip` that returns true at
 `ConsecutiveFailures >= 5`. gobreaker's default `ReadyToTrip` trips at more
 than 5 consecutive failures, which is `ConsecutiveFailures = 6`.
+
+## Slow Trip Duration
+
+The outcome window counts requests, not time. At 5,000 requests per second, its
+100 outcomes cover about 20ms of traffic, so a single short stall (CPU
+throttling, a GC pause) can fill it with slow requests. Under a traffic spike,
+such stalls make a healthy downstream look degraded.
+
+When the failure rate reaches `theta_t` only because slow requests count as
+failures, the circuit therefore opens only once that condition has held without
+interruption for `SlowTripDuration` (default 1s), and the window has taken in
+at least `WindowSize` new outcomes since it started. The second rule matters
+under low traffic, where one burst can stay in the window for longer than
+`SlowTripDuration`. A downstream that stays slow still opens the circuit, about
+`SlowTripDuration` later than it would without the rule.
+
+Errors are not delayed: if the errors alone reach `theta_t`, or
+`ConsecutiveFailures` is reached, the circuit opens at once. Set
+`SlowTripDuration` to 0 to open on slow requests as soon as the threshold is
+reached.
 
 ## Warmup Period
 
@@ -127,6 +149,14 @@ failure rate hovers near the adaptive threshold.
 > **Note:** `MinDwellTime` is an implementation safeguard not described in the
 > original circuit breaker design. It is documented as a justified deviation
 > because it prevents instability at the cost of slightly delaying re-trip.
+
+## Half-Open Probes
+
+A probe is judged by `IsSuccessful` only. A probe that succeeds but is slower
+than the slow limit closes the circuit: a single slow probe is weak evidence,
+and reopening on it would keep a healthy but loaded downstream cut off for
+another `RecoveryTimeout`. If the downstream is still slow, the Closed circuit
+opens again once `MinDwellTime` and `SlowTripDuration` have passed.
 
 ## Half-Open Timeout
 
@@ -194,10 +224,13 @@ during warm-up and while only a fallback baseline exists, it behaves like
   can keep the circuit tripping. Raise `SlowRequestMargin` or create a new
   `CircuitBreaker` if the healthy latency changes.
 - A slow request counts as a failure and also raises `Dt`, which lowers
-  `theta_t`. A burst of slow requests therefore trips the circuit sooner than
-  the same number of errors: when latency is N times the baseline, slow
-  requests making up about `ThetaBase / N` of the window are enough
-  (about 18 of 100 at 3.5x).
+  `theta_t`: when latency is N times the baseline, slow requests making up
+  about `ThetaBase / N` of the window reach the threshold (about 18 of 100 at
+  3.5x). `SlowTripDuration` keeps a short burst from tripping the circuit this
+  way, but a slowdown that lasts longer does.
+- While a downstream stays slow without errors, each recovery lets traffic
+  through for about `MinDwellTime` (plus `SlowTripDuration`) before the circuit
+  opens again, because probes are judged by their error only.
 
 ## Ignoring Errors
 

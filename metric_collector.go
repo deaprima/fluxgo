@@ -53,6 +53,15 @@ func (m *MetricCollector) RecordOutcome(generation uint64, success bool) {
 	}
 }
 
+// recordSlowOutcome adds a successful request classified as slow, belonging
+// to the given generation, to the outcome window. It counts as a failure,
+// in the window and in the lifetime counters, but not as an error.
+func (m *MetricCollector) recordSlowOutcome(generation uint64) {
+	m.outcomes.add(generation, outcomeSlow)
+	atomic.AddInt64(&m.totalRequests, 1)
+	atomic.AddInt64(&m.totalFailures, 1)
+}
+
 // FailureRate returns the ratio of failed requests to all requests held in
 // the outcome window. It returns 0 if the window is empty.
 func (m *MetricCollector) FailureRate() float64 {
@@ -64,6 +73,12 @@ func (m *MetricCollector) FailureRate() float64 {
 // held in the outcome window.
 func (m *MetricCollector) WindowStats() (failureRate float64, count int) {
 	return m.outcomes.Stats()
+}
+
+// windowStats returns the failure rate, the error rate (failures that are
+// not slow requests), and the number of requests held in the outcome window.
+func (m *MetricCollector) windowStats() (failureRate, errorRate float64, count int) {
+	return m.outcomes.stats()
 }
 
 // AdvanceWindow moves the outcome window to the given generation, discarding

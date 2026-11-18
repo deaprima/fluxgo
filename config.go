@@ -27,8 +27,9 @@ const (
 	// SlowRefBaseline compares a request with the healthy-state percentile
 	// baseline (Pbase × SlowRequestMargin) once a valid baseline has been
 	// captured, and behaves like SlowRefRecent until then. It also detects
-	// gradual degradation, at the cost of classifying sustained traffic
-	// spikes above the margin as slow. The baseline is never recaptured, so
+	// gradual degradation, at the cost of classifying requests slowed down by
+	// a traffic spike above the margin as slow; SlowTripDuration keeps short
+	// bursts of them from opening the circuit. The baseline is never recaptured, so
 	// a downstream that becomes permanently slower than the margin allows
 	// keeps being classified as slow. This is the default.
 	SlowRefBaseline
@@ -98,7 +99,9 @@ type Config struct {
 	// HalfOpenMaxRequests is the number of probe requests allowed through
 	// while the circuit is Half-Open. Further requests are rejected with
 	// ErrTooManyRequests. The circuit closes once this many probes succeed
-	// and reopens on the first failed probe. Must be at least 1. Default: 1.
+	// and reopens on the first failed probe. Probes are judged by
+	// IsSuccessful only: a probe that succeeds but is classified as slow
+	// counts as a success. Must be at least 1. Default: 1.
 	HalfOpenMaxRequests int
 
 	// SlowRequestMargin is the multiplier applied to the latency selected by
@@ -110,6 +113,19 @@ type Config struct {
 	// against the recent rolling percentile or the healthy baseline.
 	// Default: SlowRefBaseline. The zero value is SlowRefRecent.
 	SlowRequestReference SlowRequestReference
+
+	// SlowTripDuration is how long the failure rate must stay at or above
+	// the threshold before a Closed circuit opens, when the threshold is
+	// reached only because slow requests count as failures. The window must
+	// also have taken in WindowSize new outcomes during that time, so a
+	// single burst of slow requests that stays in the window under low
+	// traffic cannot open the circuit. This keeps short latency bursts, such
+	// as CPU throttling under a load spike, from opening the circuit, while
+	// a downstream that stays slow still does. When errors alone reach the
+	// threshold, or ConsecutiveFailures is reached, the circuit opens at
+	// once. 0 opens the circuit as soon as the threshold is reached.
+	// Default: 1s.
+	SlowTripDuration time.Duration
 }
 
 // DefaultConfig returns a Config with sensible starting-point values for
@@ -133,6 +149,7 @@ func DefaultConfig() Config {
 		HalfOpenMaxRequests:  1,
 		SlowRequestMargin:    3.0,
 		SlowRequestReference: SlowRefBaseline,
+		SlowTripDuration:     time.Second,
 	}
 }
 
@@ -188,6 +205,9 @@ func (c Config) Validate() error {
 	}
 	if c.SlowRequestReference != SlowRefRecent && c.SlowRequestReference != SlowRefBaseline {
 		return errors.New("slow request reference must be SlowRefRecent or SlowRefBaseline")
+	}
+	if c.SlowTripDuration < 0 {
+		return errors.New("slow trip duration must be non-negative")
 	}
 	return nil
 }

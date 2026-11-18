@@ -87,7 +87,18 @@ type CircuitBreaker struct {
 	// consecutiveErrors counts requests in a row that IsSuccessful reported
 	// as failed, ignoring slow classification, for Config.ConsecutiveFailures.
 	consecutiveErrors int64
+
+	// now is the clock used for Config.SlowTripDuration.
+	now func() time.Time
+	// slowTripSince is the time, in Unix nanoseconds, since which the failure
+	// rate has reached the threshold only with slow requests counted, or
+	// noSlowTrip. slowTripRequests is the lifetime request count at that time.
+	slowTripSince    int64
+	slowTripRequests int64
 }
+
+// noSlowTrip marks slowTripSince as unset.
+const noSlowTrip = math.MinInt64
 
 // NewCircuitBreaker returns a CircuitBreaker wired and ready to use.
 // It panics if s.Config is invalid.
@@ -119,6 +130,8 @@ func newCircuitBreakerWithClock(s Settings, now func() time.Time) *CircuitBreake
 		estimator:     newBaselineEstimatorWithClock(cfg, now),
 		calculator:    NewAdaptiveThresholdCalculator(cfg),
 		machine:       newStateMachineWithClock(cfg, now),
+		now:           now,
+		slowTripSince: noSlowTrip,
 	}
 }
 
@@ -206,14 +219,15 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 // against the current threshold and the run of consecutive errors. success
 // reports whether IsSuccessful accepted the request's error; only latencies
 // of such requests feed the latency signals, and only if they were admitted
-// in the current generation.
+// in the current generation. A Half-Open probe is judged by success alone,
+// so a probe that succeeds but is classified as slow closes the circuit.
 func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Duration, success bool) {
-	failed := !success
+	slow := false
 
 	var p95, p99 float64
 	if success && generation == cb.machine.Generation() {
 		if limit := cb.slowLimit(); limit > 0 && latency.Seconds()*1000 > limit {
-			failed = true
+			slow = true
 			cb.collector.RecordDegraded()
 		}
 		p95, p99 = cb.collector.RecordLatency(latency)
@@ -221,7 +235,12 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 		p95, p99 = cb.rolling.Current()
 	}
 
-	cb.collector.RecordOutcome(generation, !failed)
+	failed := !success || slow
+	if slow {
+		cb.collector.recordSlowOutcome(generation)
+	} else {
+		cb.collector.RecordOutcome(generation, success)
+	}
 	if failed {
 		atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 		atomic.AddInt64(&cb.consecutiveFailures, 1)
@@ -233,7 +252,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 
 	St := cb.ewma.Value()
 	Pt := cb.selectPercentile(p95, p99)
-	fr, n := cb.collector.WindowStats()
+	fr, errorRate, n := cb.collector.windowStats()
 	state := cb.machine.State()
 
 	if cb.estimator.NeedsCapture() {
@@ -245,7 +264,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 
 	switch state {
 	case StateHalfOpen:
-		if !failed {
+		if success {
 			if cb.machine.OnHalfOpenSuccess(generation) {
 				cb.handleTransition(StateHalfOpen, StateClosed)
 			}
@@ -253,7 +272,7 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 			cb.handleTransition(StateHalfOpen, StateOpen)
 		}
 	case StateClosed:
-		if cb.shouldTrip(n, fr, thetaT, streak) && cb.machine.tripClosed(generation) {
+		if cb.shouldTrip(n, fr, errorRate, thetaT, streak) && cb.machine.tripClosed(generation) {
 			cb.handleTransition(StateClosed, StateOpen)
 		}
 	}
@@ -277,11 +296,43 @@ func (cb *CircuitBreaker) recordErrorStreak(generation uint64, success bool) int
 // shouldTrip reports whether a Closed circuit should open: either streak
 // consecutive errors reach Config.ConsecutiveFailures, or the outcome window
 // holds at least MinRequests outcomes and its failure rate reaches thetaT.
-func (cb *CircuitBreaker) shouldTrip(outcomes int, failureRate, thetaT float64, streak int64) bool {
+// When the failure rate reaches thetaT only because slow requests count as
+// failures, the condition must also have held for Config.SlowTripDuration.
+func (cb *CircuitBreaker) shouldTrip(outcomes int, failureRate, errorRate, thetaT float64, streak int64) bool {
 	if cb.cfg.ConsecutiveFailures > 0 && streak >= int64(cb.cfg.ConsecutiveFailures) {
 		return true
 	}
-	return outcomes >= cb.cfg.MinRequests && failureRate >= thetaT
+	if outcomes < cb.cfg.MinRequests || failureRate < thetaT {
+		// Load first: on the hot path the timer is almost always unset, and
+		// a store on every request would contend across cores.
+		if atomic.LoadInt64(&cb.slowTripSince) != noSlowTrip {
+			atomic.StoreInt64(&cb.slowTripSince, noSlowTrip)
+		}
+		return false
+	}
+	if errorRate >= thetaT || cb.cfg.SlowTripDuration == 0 {
+		return true
+	}
+	return cb.slowTripSustained()
+}
+
+// slowTripSustained reports whether the failure rate has reached the
+// threshold, with slow requests counted, for at least SlowTripDuration and
+// over at least WindowSize new outcomes, so that none of the outcomes that
+// started the condition are still in the window. It starts timing the
+// condition on its first call after a reset.
+func (cb *CircuitBreaker) slowTripSustained() bool {
+	now := cb.now().UnixNano()
+	requests := cb.collector.TotalRequests()
+	since := atomic.LoadInt64(&cb.slowTripSince)
+	if since == noSlowTrip {
+		if atomic.CompareAndSwapInt64(&cb.slowTripSince, noSlowTrip, now) {
+			atomic.StoreInt64(&cb.slowTripRequests, requests)
+		}
+		return false
+	}
+	return now-since >= int64(cb.cfg.SlowTripDuration) &&
+		requests-atomic.LoadInt64(&cb.slowTripRequests) >= int64(cb.cfg.WindowSize)
 }
 
 // handleTransition moves the outcome window to the new generation, resets
@@ -298,6 +349,7 @@ func (cb *CircuitBreaker) handleTransition(from, to State) {
 	atomic.StoreInt64(&cb.consecutiveSuccesses, 0)
 	atomic.StoreInt64(&cb.consecutiveFailures, 0)
 	atomic.StoreInt64(&cb.consecutiveErrors, 0)
+	atomic.StoreInt64(&cb.slowTripSince, noSlowTrip)
 	if cb.onStateChange != nil {
 		cb.onStateChange(cb.name, from, to)
 	}

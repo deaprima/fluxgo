@@ -149,6 +149,24 @@ func TestValidateConsecutiveFailures(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_SlowTripDuration(t *testing.T) {
+	if got := DefaultConfig().SlowTripDuration; got != time.Second {
+		t.Errorf("DefaultConfig().SlowTripDuration = %v, want 1s", got)
+	}
+}
+
+func TestValidateSlowTripDuration(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SlowTripDuration = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("SlowTripDuration = 0: unexpected error %v", err)
+	}
+	cfg.SlowTripDuration = -time.Millisecond
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for a negative SlowTripDuration, got nil")
+	}
+}
+
 func TestValidateRejectsHalfOpenMaxRequestsBelowOne(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.HalfOpenMaxRequests = 0

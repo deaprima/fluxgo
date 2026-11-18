@@ -16,6 +16,12 @@
   and the baseline is kept. Until `MinRequests` new latencies arrive, the circuit
   uses `ThetaBase`, and `SlowRefRecent` classification is inactive.
 - Latencies of requests admitted before the latest transition are ignored.
+- A Half-Open probe is judged by `IsSuccessful` only: a probe that succeeds
+  but is classified as slow now closes the circuit instead of reopening it for
+  another `RecoveryTimeout`. During a traffic spike, one probe just above the
+  slow limit kept a healthy downstream cut off after the spike had ended. If
+  the downstream is still slow, the circuit opens again after `MinDwellTime`
+  and `SlowTripDuration`.
 - A panic in `req` now propagates without being recovered and re-raised.
 - The minimum Go version is lowered from 1.26.4 to 1.21.
 
@@ -26,7 +32,15 @@
   about 60 failed requests to fill the outcome window. Set it to 0 for the
   previous behavior.
 - `Config.SlowRequestReference`: classify slow requests against the recent
-  percentile (`SlowRefRecent`, default) or the healthy baseline (`SlowRefBaseline`).
+  percentile (`SlowRefRecent`) or the healthy baseline (`SlowRefBaseline`,
+  default).
+- `Config.SlowTripDuration` (default 1s): when the failure rate reaches the
+  threshold only because slow requests count as failures, it must stay there
+  for this long, over at least `WindowSize` new outcomes, before the circuit
+  opens. Errors still open it at once. At high throughput the outcome window
+  covers a few milliseconds, so a single CPU throttling stall during a traffic
+  spike filled it with slow requests and opened the circuit on a healthy
+  downstream. Set it to 0 for the previous behavior.
 - `Settings.IsSuccessful`, with the same semantics as gobreaker.
 - MIT license.
 - Fuzz test, scenario tests, runnable examples, and a benchmark comparison with

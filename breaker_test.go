@@ -189,6 +189,14 @@ func newWarmedUpBreaker(t *testing.T, margin float64) *CircuitBreaker {
 
 func newWarmedUpBreakerWithConfig(t *testing.T, cfg Config) *CircuitBreaker {
 	t.Helper()
+	cb, _ := newWarmedUpBreakerWithClock(t, cfg)
+	return cb
+}
+
+// newWarmedUpBreakerWithClock is newWarmedUpBreakerWithConfig that also
+// returns the breaker's clock.
+func newWarmedUpBreakerWithClock(t *testing.T, cfg Config) (*CircuitBreaker, *fakeClock) {
+	t.Helper()
 	clock := newFakeClock()
 	cfg.WarmupDuration = 50 * time.Millisecond
 
@@ -203,7 +211,7 @@ func newWarmedUpBreakerWithConfig(t *testing.T, cfg Config) *CircuitBreaker {
 	if cb.Snapshot().IsWarmingUp {
 		t.Fatal("expected warm-up to be complete")
 	}
-	return cb
+	return cb, clock
 }
 
 func TestCircuitBreaker_SlowRequest_ClassifiedAsDegraded(t *testing.T) {
@@ -784,12 +792,17 @@ func TestCircuitBreaker_StaleLatencyIgnoredAfterRecovery(t *testing.T) {
 	}
 }
 
-func rampLatency(cb *CircuitBreaker) time.Duration {
+// rampLatency raises the latency by 2% every 20 requests, sent 10ms apart,
+// and returns the latency at which the circuit opened, or 0 if it never did.
+func rampLatency(cb *CircuitBreaker, clock *fakeClock) time.Duration {
 	for ms := 10.0; ms <= 1480; ms *= 1.02 {
 		latency := time.Duration(ms * float64(time.Millisecond))
-		executeWithLatency(cb, latency, true)
-		if cb.State() == StateOpen {
-			return latency
+		for i := 0; i < 20; i++ {
+			clock.Advance(10 * time.Millisecond)
+			executeWithLatency(cb, latency, true)
+			if cb.State() == StateOpen {
+				return latency
+			}
 		}
 	}
 	return 0
@@ -799,9 +812,9 @@ func TestCircuitBreaker_SlowRefRecent_MissesGradualDegradation(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinDwellTime = 0
 	cfg.SlowRequestReference = SlowRefRecent
-	cb := newWarmedUpBreakerWithConfig(t, cfg)
+	cb, clock := newWarmedUpBreakerWithClock(t, cfg)
 
-	if latency := rampLatency(cb); latency != 0 {
+	if latency := rampLatency(cb, clock); latency != 0 {
 		t.Fatalf("expected SlowRefRecent to stay closed on a gradual ramp, opened at %v", latency)
 	}
 	if got := cb.collector.DegradedRequests(); got != 0 {
@@ -813,9 +826,9 @@ func TestCircuitBreaker_SlowRefBaseline_DetectsGradualDegradation(t *testing.T) 
 	cfg := DefaultConfig()
 	cfg.MinDwellTime = 0
 	cfg.SlowRequestReference = SlowRefBaseline
-	cb := newWarmedUpBreakerWithConfig(t, cfg)
+	cb, clock := newWarmedUpBreakerWithClock(t, cfg)
 
-	latency := rampLatency(cb)
+	latency := rampLatency(cb, clock)
 	if latency == 0 {
 		t.Fatal("expected SlowRefBaseline to open the circuit on a gradual ramp")
 	}
@@ -848,6 +861,134 @@ func TestCircuitBreaker_SlowRefBaseline_ShortSpikeDoesNotTrip(t *testing.T) {
 	}
 	if got := cb.collector.DegradedRequests(); got != spike {
 		t.Errorf("expected every spike request to be classified as slow, got %d", got)
+	}
+}
+
+// newSlowTripBreaker returns a warmed-up breaker with a 10ms baseline, so
+// requests above 30ms are slow, and without MinDwellTime.
+func newSlowTripBreaker(t *testing.T, slowTripDuration time.Duration) (*CircuitBreaker, *fakeClock) {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	cfg.SlowTripDuration = slowTripDuration
+	return newWarmedUpBreakerWithClock(t, cfg)
+}
+
+// sendEvery sends n requests of the given latency and outcome, advancing the
+// clock by gap before each, and returns how many were sent before the
+// circuit opened (n if it stayed closed).
+func sendEvery(cb *CircuitBreaker, clock *fakeClock, n int, gap, latency time.Duration, success bool) int {
+	for i := 0; i < n; i++ {
+		clock.Advance(gap)
+		executeWithLatency(cb, latency, success)
+		if cb.State() == StateOpen {
+			return i
+		}
+	}
+	return n
+}
+
+func TestCircuitBreaker_SlowTrip_BurstFillingWindowDoesNotTrip(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, time.Second)
+
+	// A 20ms throttling stall at 5,000 requests per second fills the whole
+	// window with slow requests, then latency returns to normal.
+	sendEvery(cb, clock, 100, 200*time.Microsecond, 50*time.Millisecond, true)
+	sendEvery(cb, clock, 5000, 200*time.Microsecond, 10*time.Millisecond, true)
+
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed after a burst shorter than SlowTripDuration", cb.State())
+	}
+}
+
+func TestCircuitBreaker_SlowTrip_LowTrafficBurstDoesNotTrip(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, time.Second)
+
+	// At 10 requests per second the window spans 10s, so a 2s burst stays in
+	// it for longer than SlowTripDuration; it is still a single burst.
+	sendEvery(cb, clock, 20, 100*time.Millisecond, 50*time.Millisecond, true)
+	sendEvery(cb, clock, 200, 100*time.Millisecond, 10*time.Millisecond, true)
+
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed: the burst must not trip once it ages in the window", cb.State())
+	}
+}
+
+func TestCircuitBreaker_SlowTrip_SustainedSlownessTrips(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, time.Second)
+
+	// 200 requests per second, all slow: the threshold is reached on the
+	// first request, and the circuit opens after one second.
+	sent := sendEvery(cb, clock, 1000, 5*time.Millisecond, 50*time.Millisecond, true)
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected sustained slowness to open the circuit")
+	}
+	if elapsed := time.Duration(sent+1) * 5 * time.Millisecond; elapsed < time.Second || elapsed > 1100*time.Millisecond {
+		t.Errorf("opened after %v of slowness, want just over SlowTripDuration (1s)", elapsed)
+	}
+}
+
+func TestCircuitBreaker_SlowTrip_InterruptedConditionRestarts(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, time.Second)
+
+	// Two 0.5s periods of slowness, separated by enough normal traffic to
+	// bring the failure rate back under the threshold. The condition lasts a
+	// little longer than each period, until the slow requests have left the
+	// window (about 0.4s here), but less than SlowTripDuration.
+	sendEvery(cb, clock, 100, 5*time.Millisecond, 50*time.Millisecond, true)
+	sendEvery(cb, clock, 200, 5*time.Millisecond, 10*time.Millisecond, true)
+	sendEvery(cb, clock, 100, 5*time.Millisecond, 50*time.Millisecond, true)
+
+	if cb.State() != StateClosed {
+		t.Fatalf("State() = %v, want Closed: neither period lasted SlowTripDuration", cb.State())
+	}
+}
+
+func TestCircuitBreaker_SlowTrip_ErrorsTripWithoutDelay(t *testing.T) {
+	cb, _ := newSlowTripBreaker(t, time.Second)
+
+	// Three errors out of four, never five in a row, with no time passing:
+	// errors alone reach the threshold, so SlowTripDuration does not apply.
+	for i := 0; i < 400 && cb.State() == StateClosed; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, i%4 == 3)
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected a 75% error rate to open the circuit without waiting")
+	}
+}
+
+func TestCircuitBreaker_SlowTrip_ZeroTripsAtOnce(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, 0)
+
+	sendEvery(cb, clock, 100, 200*time.Microsecond, 50*time.Millisecond, true)
+
+	if cb.State() != StateOpen {
+		t.Fatal("expected SlowTripDuration = 0 to open the circuit on the burst")
+	}
+}
+
+func TestCircuitBreaker_HalfOpenProbe_SlowSuccessCloses(t *testing.T) {
+	cb, clock := newSlowTripBreaker(t, time.Second)
+
+	for i := 0; i < cb.cfg.ConsecutiveFailures; i++ {
+		executeWithLatency(cb, 10*time.Millisecond, false)
+	}
+	if cb.State() != StateOpen {
+		t.Fatal("expected consecutive errors to open the circuit")
+	}
+	clock.Advance(cb.cfg.RecoveryTimeout)
+
+	// The probe succeeds, but above the 30ms slow limit.
+	before := cb.collector.DegradedRequests()
+	executeWithLatency(cb, 50*time.Millisecond, true)
+
+	if got := cb.collector.DegradedRequests(); got != before+1 {
+		t.Errorf("expected the probe to be classified as slow, got %d new slow requests", got-before)
+	}
+	if cb.State() != StateClosed {
+		t.Errorf("State() = %v, want Closed: a probe is judged by its error only", cb.State())
 	}
 }
 
