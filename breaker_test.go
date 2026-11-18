@@ -1007,9 +1007,11 @@ func TestCircuitBreaker_SlowTrip_ZeroTripsAtOnce(t *testing.T) {
 	}
 }
 
-func TestCircuitBreaker_HalfOpenProbe_SlowSuccessCloses(t *testing.T) {
+// newHalfOpenSlowTripBreaker returns a breaker like newSlowTripBreaker that
+// has been opened by consecutive errors and is ready to admit a probe.
+func newHalfOpenSlowTripBreaker(t *testing.T) (*CircuitBreaker, *fakeClock) {
+	t.Helper()
 	cb, clock := newSlowTripBreaker(t, time.Second)
-
 	for i := 0; i < cb.cfg.ConsecutiveFailures; i++ {
 		executeWithLatency(cb, 10*time.Millisecond, false)
 	}
@@ -1017,16 +1019,62 @@ func TestCircuitBreaker_HalfOpenProbe_SlowSuccessCloses(t *testing.T) {
 		t.Fatal("expected consecutive errors to open the circuit")
 	}
 	clock.Advance(cb.cfg.RecoveryTimeout)
+	return cb, clock
+}
 
-	// The probe succeeds, but above the 30ms slow limit.
+func TestCircuitBreaker_HalfOpenProbe_SlowSuccessIsInconclusive(t *testing.T) {
+	cb, clock := newHalfOpenSlowTripBreaker(t)
+
+	// Probes succeed, but above the 30ms slow limit: each one frees its slot
+	// for the next, and the circuit stays Half-Open. They keep completing,
+	// so the circuit does not reopen as if a probe had hung.
 	before := cb.collector.DegradedRequests()
-	executeWithLatency(cb, 50*time.Millisecond, true)
-
-	if got := cb.collector.DegradedRequests(); got != before+1 {
-		t.Errorf("expected the probe to be classified as slow, got %d new slow requests", got-before)
+	for i := 0; i < 10; i++ {
+		if err := executeWithLatency(cb, 50*time.Millisecond, true); err != nil {
+			t.Fatalf("probe %d: error %v, want the slot of the previous slow probe to be free", i, err)
+		}
+		clock.Advance(cb.cfg.RecoveryTimeout / 4)
 	}
+
+	if got := cb.collector.DegradedRequests(); got != before+10 {
+		t.Errorf("expected every probe to be classified as slow, got %d new slow requests", got-before)
+	}
+	if cb.State() != StateHalfOpen {
+		t.Fatalf("State() = %v, want HalfOpen while probes are slow", cb.State())
+	}
+
+	// Latency is back to normal: the next probe closes the circuit.
+	executeWithLatency(cb, 10*time.Millisecond, true)
 	if cb.State() != StateClosed {
-		t.Errorf("State() = %v, want Closed: a probe is judged by its error only", cb.State())
+		t.Errorf("State() = %v, want Closed after a probe that is not slow", cb.State())
+	}
+}
+
+func TestCircuitBreaker_HalfOpenProbe_ErrorAfterSlowProbeReopens(t *testing.T) {
+	cb, _ := newHalfOpenSlowTripBreaker(t)
+
+	executeWithLatency(cb, 50*time.Millisecond, true)
+	executeWithLatency(cb, 10*time.Millisecond, false)
+
+	if cb.State() != StateOpen {
+		t.Errorf("State() = %v, want Open after a failed probe", cb.State())
+	}
+}
+
+func TestCircuitBreaker_HalfOpenProbe_SlowProbeLimitsConcurrency(t *testing.T) {
+	cb, _ := newHalfOpenSlowTripBreaker(t)
+
+	// A probe is in flight: further requests are rejected until it completes.
+	generation, _, err := cb.machine.AllowRequest()
+	if err != nil {
+		t.Fatalf("AllowRequest() error = %v, want the probe to be admitted", err)
+	}
+	if err := executeWithLatency(cb, 10*time.Millisecond, true); !errors.Is(err, ErrTooManyRequests) {
+		t.Fatalf("Execute() error = %v, want ErrTooManyRequests while the probe is in flight", err)
+	}
+	cb.onRequestComplete(generation, 50*time.Millisecond, true)
+	if err := executeWithLatency(cb, 50*time.Millisecond, true); err != nil {
+		t.Errorf("Execute() error = %v, want a new probe once the slow one completed", err)
 	}
 }
 

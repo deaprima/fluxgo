@@ -16,12 +16,13 @@
   and the baseline is kept. Until `MinRequests` new latencies arrive, the circuit
   uses `ThetaBase`, and `SlowRefRecent` classification is inactive.
 - Latencies of requests admitted before the latest transition are ignored.
-- A Half-Open probe is judged by `IsSuccessful` only: a probe that succeeds
-  but is classified as slow now closes the circuit instead of reopening it for
-  another `RecoveryTimeout`. During a traffic spike, one probe just above the
-  slow limit kept a healthy downstream cut off after the spike had ended. If
-  the downstream is still slow, the circuit opens again after `MinDwellTime`
-  and `SlowTripDuration`.
+- A Half-Open probe that succeeds but is classified as slow is now
+  inconclusive: it frees its slot for another probe and the circuit stays
+  Half-Open, instead of reopening for another `RecoveryTimeout`. The circuit
+  closes on the first probe that is not slow. During a traffic spike, one
+  probe just above the slow limit kept a healthy downstream cut off after the
+  spike had ended. While the downstream stays slow, callers get
+  `ErrTooManyRequests` rather than `ErrOpenState`.
 - The adaptive threshold `theta_t = ThetaBase / Dt` now applies to the error
   rate only. The failure rate with slow requests counted is compared with
   `ThetaBase` (clamped to `[ThetaMin, ThetaMax]`). Before, rising latency both
@@ -55,7 +56,8 @@
 
 ### Fixed
 - Half-Open no longer gets stuck when a probe never completes: once every probe
-  slot is taken and `RecoveryTimeout` has passed, the circuit returns to Open.
+  slot is taken and the newest probe was admitted `RecoveryTimeout` ago, the
+  circuit returns to Open.
 - `runtime.Goexit` inside `req` is recorded as a failure and no longer leaks a
   probe slot.
 - `Counts` saturates at `math.MaxUint32` instead of wrapping around.

@@ -57,7 +57,7 @@ if errors.Is(err, fluxgo.ErrOpenState) {
 | `MinDwellTime` | `5s` | Minimum time after a transition before the circuit can trip to Open (anti-flapping) |
 | `MinRequests` | `20` | Minimum volume in the outcome window before evaluating the failure rate or capturing a valid baseline |
 | `ConsecutiveFailures` | `5` | Errors in a row that open the circuit regardless of the failure rate; slow requests do not count. 0 disables it. See [Consecutive Failures](#consecutive-failures). |
-| `HalfOpenMaxRequests` | `1` | Probes admitted per Half-Open period; the circuit closes once this many succeed. Probes are judged by their error only, not by their latency |
+| `HalfOpenMaxRequests` | `1` | Probes admitted at a time while Half-Open; the circuit closes once this many succeed without being slow. A slow but successful probe frees its slot for another. See [Half-Open Probes](#half-open-probes). |
 | `SlowRequestMargin` | `3.0` | Multiplier on the slow request reference; successful requests above it are classified as degraded |
 | `SlowRequestReference` | `SlowRefBaseline` | Reference for slow request classification: `SlowRefBaseline` (healthy Pbase once a valid baseline is captured) or `SlowRefRecent` (current Pt). See [Slow Request Classification](#slow-request-classification). |
 | `SlowTripDuration` | `1s` | How long the failure rate with slow requests counted must stay at or above its threshold, over at least `WindowSize` new outcomes, before the circuit opens. Errors are not delayed. 0 trips at once. See [Slow Trip Duration](#slow-trip-duration). |
@@ -160,18 +160,29 @@ failure rate hovers near the adaptive threshold.
 
 ## Half-Open Probes
 
-A probe is judged by `IsSuccessful` only. A probe that succeeds but is slower
-than the slow limit closes the circuit: a single slow probe is weak evidence,
-and reopening on it would keep a healthy but loaded downstream cut off for
-another `RecoveryTimeout`. If the downstream is still slow, the Closed circuit
-opens again once `MinDwellTime` and `SlowTripDuration` have passed.
+Each probe has one of three results:
+
+| Probe | Result |
+|---|---|
+| Fails (`IsSuccessful` reports an error) | The circuit reopens for another `RecoveryTimeout` |
+| Succeeds within the slow limit | Counts as a success; the circuit closes once `HalfOpenMaxRequests` probes have succeeded |
+| Succeeds but is classified as slow | Inconclusive: the probe frees its slot, another probe is admitted, and the circuit stays Half-Open |
+
+A single slow probe is weak evidence either way. Reopening on it kept a healthy
+downstream that was only slowed down by load cut off for another
+`RecoveryTimeout`; closing on it let full traffic through to a downstream that
+was still degraded. While probes stay slow, the circuit therefore keeps probing
+with at most `HalfOpenMaxRequests` requests at a time, rejects the others with
+`ErrTooManyRequests`, and closes on the first probe that is not slow, as soon
+as latency is back to normal.
 
 ## Half-Open Timeout
 
-If every Half-Open probe slot is taken and no probe has completed within
-`RecoveryTimeout` (for example, because the downstream hangs and the caller
-sets no timeout), the circuit returns to Open instead of rejecting requests
-with `ErrTooManyRequests` forever. A late result from such a probe is ignored,
+If every Half-Open probe slot is taken and the newest probe was admitted
+`RecoveryTimeout` ago without a result (for example, because the downstream
+hangs and the caller sets no timeout), the circuit returns to Open instead of
+rejecting requests with `ErrTooManyRequests` forever. Slow probes that complete
+keep the circuit Half-Open for as long as they last. A late result from such a probe is ignored,
 and a new probe is admitted after the next `RecoveryTimeout`.
 
 ## Recovery Behavior
@@ -235,9 +246,10 @@ during warm-up and while only a fallback baseline exists, it behaves like
   `ThetaBase` of the window (60 of 100 by default), however slow they are. A
   downstream where only a minority of requests becomes slow keeps the circuit
   closed; with errors on top, `theta_t` still falls with the latency.
-- While a downstream stays slow without errors, each recovery lets traffic
-  through for about `MinDwellTime` (plus `SlowTripDuration`) before the circuit
-  opens again, because probes are judged by their error only.
+- While a downstream stays slow without errors, the circuit stays Half-Open
+  after the first `RecoveryTimeout` and keeps sending it `HalfOpenMaxRequests`
+  requests at a time. Callers get `ErrTooManyRequests` instead of
+  `ErrOpenState` during that time.
 
 ## Ignoring Errors
 

@@ -103,9 +103,10 @@ type Config struct {
 	// HalfOpenMaxRequests is the number of probe requests allowed through
 	// while the circuit is Half-Open. Further requests are rejected with
 	// ErrTooManyRequests. The circuit closes once this many probes succeed
-	// and reopens on the first failed probe. Probes are judged by
-	// IsSuccessful only: a probe that succeeds but is classified as slow
-	// counts as a success. Must be at least 1. Default: 1.
+	// without being classified as slow, and reopens on the first failed
+	// probe. A probe that succeeds but is slow is inconclusive: it frees its
+	// slot for another probe and the circuit stays Half-Open. Must be at
+	// least 1. Default: 1.
 	HalfOpenMaxRequests int
 
 	// SlowRequestMargin is the multiplier applied to the latency selected by

@@ -63,6 +63,7 @@ type StateMachine struct {
 	generation        uint64
 	openedAt          time.Time
 	lastTransition    time.Time
+	lastProbe         time.Time // when the newest half-open probe was admitted
 	halfOpenRequests  int
 	halfOpenSuccesses int
 }
@@ -108,9 +109,9 @@ func (t transition) occurred() bool {
 // transition, which it reports in change:
 //   - Open to HalfOpen, once RecoveryTimeout has elapsed since the circuit
 //     opened.
-//   - HalfOpen to Open, once every probe slot has been taken and the circuit
-//     has been HalfOpen for RecoveryTimeout without a decision, so probes that
-//     never complete cannot keep the circuit half-open forever.
+//   - HalfOpen to Open, once every probe slot has been taken and the newest
+//     probe was admitted RecoveryTimeout ago without a decision, so probes
+//     that never complete cannot keep the circuit half-open forever.
 //
 // It returns ErrOpenState while the circuit is Open and ErrTooManyRequests
 // once HalfOpenMaxRequests probes have been admitted in the current
@@ -123,7 +124,7 @@ func (sm *StateMachine) AllowRequest() (generation uint64, change transition, er
 		change = transition{from: StateOpen, to: StateHalfOpen}
 		sm.setState(StateHalfOpen)
 	case sm.state == StateHalfOpen && sm.halfOpenRequests >= sm.cfg.HalfOpenMaxRequests &&
-		sm.now().Sub(sm.lastTransition) >= sm.cfg.RecoveryTimeout:
+		sm.now().Sub(sm.lastProbe) >= sm.cfg.RecoveryTimeout:
 		change = transition{from: StateHalfOpen, to: StateOpen}
 		sm.openedAt = sm.now()
 		sm.setState(StateOpen)
@@ -136,6 +137,7 @@ func (sm *StateMachine) AllowRequest() (generation uint64, change transition, er
 			return sm.generation, change, ErrTooManyRequests
 		}
 		sm.halfOpenRequests++
+		sm.lastProbe = sm.now()
 	}
 	return sm.generation, change, nil
 }
@@ -184,6 +186,19 @@ func (sm *StateMachine) OnHalfOpenSuccess(generation uint64) bool {
 	}
 	sm.setState(StateClosed)
 	return true
+}
+
+// releaseProbe frees the slot of a probe from the given generation whose
+// result was inconclusive, so another probe can be admitted. The probe does
+// not count toward HalfOpenMaxRequests successes and the circuit stays
+// HalfOpen.
+func (sm *StateMachine) releaseProbe(generation uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.state != StateHalfOpen || generation != sm.generation || sm.halfOpenRequests == 0 {
+		return
+	}
+	sm.halfOpenRequests--
 }
 
 // OnHalfOpenFailure records a failed probe from the given generation and

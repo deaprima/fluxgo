@@ -219,8 +219,10 @@ func (cb *CircuitBreaker) Snapshot() Snapshot {
 // against the current threshold and the run of consecutive errors. success
 // reports whether IsSuccessful accepted the request's error; only latencies
 // of such requests feed the latency signals, and only if they were admitted
-// in the current generation. A Half-Open probe is judged by success alone,
-// so a probe that succeeds but is classified as slow closes the circuit.
+// in the current generation. A Half-Open probe that fails reopens the
+// circuit, and one that succeeds without being slow counts toward closing it;
+// one that succeeds but is classified as slow is inconclusive: its slot is
+// freed for another probe and the circuit stays Half-Open.
 func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Duration, success bool) {
 	slow := false
 
@@ -264,12 +266,17 @@ func (cb *CircuitBreaker) onRequestComplete(generation uint64, latency time.Dura
 
 	switch state {
 	case StateHalfOpen:
-		if success {
+		switch {
+		case !success:
+			if cb.machine.OnHalfOpenFailure(generation) {
+				cb.handleTransition(StateHalfOpen, StateOpen)
+			}
+		case slow:
+			cb.machine.releaseProbe(generation)
+		default:
 			if cb.machine.OnHalfOpenSuccess(generation) {
 				cb.handleTransition(StateHalfOpen, StateClosed)
 			}
-		} else if cb.machine.OnHalfOpenFailure(generation) {
-			cb.handleTransition(StateHalfOpen, StateOpen)
 		}
 	case StateClosed:
 		if cb.shouldTrip(n, fr, errorRate, thetaT, streak) && cb.machine.tripClosed(generation) {

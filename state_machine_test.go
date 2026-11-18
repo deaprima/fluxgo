@@ -311,6 +311,59 @@ func TestStateMachine_HalfOpen_ReopensWhenProbesNeverComplete(t *testing.T) {
 	}
 }
 
+func TestStateMachine_ReleaseProbe_FreesSlot(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	now, advance := smClock(time.Now())
+	sm := newStateMachineWithClock(cfg, now)
+
+	generation := tripAndRecover(t, sm, advance)
+	if _, _, err := sm.AllowRequest(); !errors.Is(err, ErrTooManyRequests) {
+		t.Fatalf("AllowRequest() error = %v, want ErrTooManyRequests while the probe is in flight", err)
+	}
+	sm.releaseProbe(generation)
+	if _, change, err := sm.AllowRequest(); err != nil || change.occurred() {
+		t.Fatalf("AllowRequest() = (%v, %v), want a new probe in the same half-open period", change, err)
+	}
+	if sm.State() != StateHalfOpen {
+		t.Errorf("State() = %v, want HalfOpen", sm.State())
+	}
+
+	// A stale release must not free the current probe's slot.
+	sm.releaseProbe(generation - 1)
+	if _, _, err := sm.AllowRequest(); !errors.Is(err, ErrTooManyRequests) {
+		t.Errorf("AllowRequest() error = %v, want ErrTooManyRequests after a stale release", err)
+	}
+}
+
+func TestStateMachine_HalfOpen_StuckTimeoutCountsFromNewestProbe(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinDwellTime = 0
+	now, advance := smClock(time.Now())
+	sm := newStateMachineWithClock(cfg, now)
+
+	// The first probe is released just before RecoveryTimeout, and a second
+	// one is admitted at once.
+	generation := tripAndRecover(t, sm, advance)
+	advance(cfg.RecoveryTimeout - time.Second)
+	sm.releaseProbe(generation)
+	if _, _, err := sm.AllowRequest(); err != nil {
+		t.Fatalf("AllowRequest() error = %v, want a second probe", err)
+	}
+
+	// RecoveryTimeout has passed since the circuit became half-open, but not
+	// since the newest probe: it is not stuck yet.
+	advance(time.Second)
+	if _, change, err := sm.AllowRequest(); change.occurred() || !errors.Is(err, ErrTooManyRequests) {
+		t.Fatalf("AllowRequest() = (%v, %v), want ErrTooManyRequests without a transition", change, err)
+	}
+
+	advance(cfg.RecoveryTimeout)
+	if _, change, _ := sm.AllowRequest(); change != (transition{from: StateHalfOpen, to: StateOpen}) {
+		t.Errorf("AllowRequest() change = %v, want HalfOpen -> Open once the newest probe hung", change)
+	}
+}
+
 func TestStateMachine_HalfOpen_StaysOpenWhileProbeSlotsRemain(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinDwellTime = 0
